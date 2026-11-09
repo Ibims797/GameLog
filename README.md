@@ -2,7 +2,7 @@
 
 <img src="app/src/main/res/drawable/img_app_icon_fg_1794173799698.jpg" alt="Story Games Tracker App Icon" width="128" height="128" style="border-radius: 28px;" />
 
-# 🎮 Story Games Tracker & Community Hub
+#  Story Games Tracker & Community Hub
 
 **Track your single-player & narrative games, 100% Platinum runs, spoiler-protected Steam achievements, and live community rankings.**
 
@@ -20,7 +20,7 @@
 
 ---
 
-## ✨ Overview
+##  Overview
 
 **Story Games Tracker & Community Hub** is a modern Android application built with **Kotlin** and **Jetpack Compose** for players who love story-driven video games and completionist runs.
 
@@ -28,26 +28,26 @@ Whether you want to automatically sync your **Steam Library & Wishlist**, track 
 
 ---
 
-## 🚀 Key Features
+##  Key Features
 
-### 📚 1. Personal Game Library & Steam Auto-Sync
+###  1. Personal Game Library & Steam Auto-Sync
 - **Zero-Bloat Local Database**: Starts completely clean using **Room SQLite** (`LocalGame`) with full offline persistence.
 - **Automatic Steam Library & Wishlist Import**: Link your 64-bit SteamID or vanity profile name once to automatically import your owned games (including playtime hours) and wishlist.
 - **IGDB API v4 & Steam Store Search**: Search for any narrative title using IGDB's **Apicalypse** query engine (with in-memory Twitch OAuth2 bearer token caching) and seamless Steam Store fallback.
 - **100% Platinum Run Glow**: Games marked with `is100Percent = true` are highlighted across your library with a custom animated **Platinum/Gold border and shimmer effect**.
 
-### 🏆 2. Steam Achievements with Story Spoiler Protection
+###  2. Steam Achievements with Story Spoiler Protection
 - **Unlocked vs. Missing Progress**: Click any game in your library to view your achievement progress bar (`X / Y unlocked • Z%`) and filter by **All**, **Unlocked (`✓`)**, or **Missing (`🔒`)**.
 - **Steam-Style Spoiler Guard**: Hidden or story-critical achievements that you haven't unlocked yet are automatically masked behind a **Spoiler Shield** (*"Hidden Achievement (Spoiler) – Tap to reveal"*). Simply tap an individual card to reveal its title and description, or toggle global spoiler masking for all remaining locked achievements.
 - **Offline Achievement Cache**: Once loaded, achievement lists are serialized and cached inside Room so you can inspect your completion checklist anytime offline.
 
-### 🌍 3. Global Community Ranking & Flexible Auth Modes
+###  3. Global Community Ranking & Flexible Auth Modes
 - **Three Flexible Modes**:
   1. **Google Sign-In Mode (Cloud & Community)**: Unlocks 5-star ratings, *"Would you recommend it?"* votes, and real-time synchronization with the global **Community Ranking** (`GlobalGameStats`).
   2. **Steam-Only Mode**: Sign in with your SteamID64, profile name, or OpenID without requiring a Google account. Enjoy automatic library, wishlist, and achievement syncing plus local notes and 100% run tracking.
   3. **Offline Mode**: Use the app completely offline with local Room storage for your library, cached achievements, completion status, and personal playthrough notes.
 
-### 🎨 4. Dynamic Theme Engine (DataStore Preferences)
+###  4. Dynamic Theme Engine (DataStore Preferences)
 Switch themes instantaneously in **Settings** (persisted via Jetpack DataStore):
 | Theme | Palette | Vibe |
 | :--- | :--- | :--- |
@@ -57,7 +57,7 @@ Switch themes instantaneously in **Settings** (persisted via Jetpack DataStore):
 
 ---
 
-## 🏗️ Architecture & Tech Stack
+##  Architecture & Tech Stack
 
 The project follows **MVVM (Model-View-ViewModel)** with a single-source-of-truth **Hybrid Repository** pattern combining local Room persistence, remote Retrofit services, and real-time Cloud Firestore synchronization.
 
@@ -81,7 +81,7 @@ flowchart TD
 
 ---
 
-## 🔒 Security & Zero-APK-Secrets Design
+##  Security & Zero-APK-Secrets Design
 
 This repository is designed to be **100% safe for public open-source hosting and APK distribution**:
 - **No Hardcoded API Keys**: Neither the source code, `BuildConfig`, nor `.env.example` contains any active API keys or client secrets.
@@ -90,7 +90,7 @@ This repository is designed to be **100% safe for public open-source hosting and
 
 ---
 
-## 📦 Getting Started & Building the APK
+##  Getting Started & Building the APK
 
 ### Option 1: Download Ready-to-Install APK (GitHub Actions)
 Every push to the repository automatically triggers the [**.github/workflows/build-apk.yml**](.github/workflows/build-apk.yml) pipeline:
@@ -115,7 +115,7 @@ Every push to the repository automatically triggers the [**.github/workflows/bui
 
 ---
 
-## 🗂️ Project Structure
+##  Project Structure
 
 ```text
 ├── .github/workflows/
