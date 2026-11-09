@@ -1,0 +1,202 @@
+{
+  "entities": {
+    "GlobalGameStats": {
+      "title": "GlobalGameStats",
+      "description": "Aggregated community ratings, recommendations, and 100% completion runs for a game.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Official title of the game."
+        },
+        "coverImageUrl": {
+          "type": "string",
+          "description": "URL of the game cover image."
+        },
+        "averageRating": {
+          "type": "number",
+          "description": "Aggregated average rating (0.0 to 5.0) across all users."
+        },
+        "ratingSum": {
+          "type": "integer",
+          "description": "Total sum of ratings submitted by users."
+        },
+        "ratingCount": {
+          "type": "integer",
+          "description": "Total count of users who rated this game."
+        },
+        "recommendCount": {
+          "type": "integer",
+          "description": "Total number of users who recommend this game."
+        },
+        "total100PercentRuns": {
+          "type": "integer",
+          "description": "Total number of users who completed a 100% run."
+        },
+        "isCommunityEntry": {
+          "type": "boolean",
+          "description": "Mandatory filter flag (always true) for secure community list queries."
+        },
+        "lastUpdatedBy": {
+          "type": "string",
+          "description": "UID of the user who last synced stats."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of creation (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last update (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "title",
+        "coverImageUrl",
+        "averageRating",
+        "ratingSum",
+        "ratingCount",
+        "recommendCount",
+        "total100PercentRuns",
+        "isCommunityEntry",
+        "lastUpdatedBy",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserGameContribution": {
+      "title": "UserGameContribution",
+      "description": "Authenticated user's personal synced game state and contribution to global stats.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner user ID matching request.auth.uid."
+        },
+        "gameId": {
+          "type": "string",
+          "description": "External API ID of the game."
+        },
+        "title": {
+          "type": "string",
+          "description": "Title of the game."
+        },
+        "coverImageUrl": {
+          "type": "string",
+          "description": "Cover image URL of the game."
+        },
+        "isPlayed": {
+          "type": "boolean",
+          "description": "Whether the user has played the game."
+        },
+        "isOwned": {
+          "type": "boolean",
+          "description": "Whether the user owns the game (Library vs Wishlist)."
+        },
+        "is100Percent": {
+          "type": "boolean",
+          "description": "Whether the user achieved a 100% Platinum/Gold run."
+        },
+        "isRecommended": {
+          "type": "boolean",
+          "description": "Whether the user recommends the game."
+        },
+        "personalRating": {
+          "type": "integer",
+          "description": "Personal rating from 0 to 5."
+        },
+        "personalNote": {
+          "type": "string",
+          "description": "Personal note or review text."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when first synced (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when last updated (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "userId",
+        "gameId",
+        "title",
+        "coverImageUrl",
+        "isPlayed",
+        "isOwned",
+        "is100Percent",
+        "isRecommended",
+        "personalRating",
+        "personalNote",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AdminApiSecrets": {
+      "title": "AdminApiSecrets",
+      "description": "Encrypted/protected API keys stored in the Cloud Admin Vault, accessible exclusively to the verified Admin.",
+      "type": "object",
+      "properties": {
+        "twitchClientId": {
+          "type": "string",
+          "description": "Twitch Client ID for IGDB API v4."
+        },
+        "twitchClientSecret": {
+          "type": "string",
+          "description": "Twitch Client Secret for IGDB OAuth2."
+        },
+        "steamApiKey": {
+          "type": "string",
+          "description": "Steam Web API key."
+        },
+        "updatedByUid": {
+          "type": "string",
+          "description": "UID of the admin who updated the vault."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of creation (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last update (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "twitchClientId",
+        "twitchClientSecret",
+        "steamApiKey",
+        "updatedByUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/global_game_stats/{gameId}": {
+      "schema": {
+        "$ref": "#/entities/GlobalGameStats"
+      },
+      "description": "Global aggregated community ratings, recommendations, and 100% completion counts per game."
+    },
+    "/users/{userId}/game_contributions/{gameId}": {
+      "schema": {
+        "$ref": "#/entities/UserGameContribution"
+      },
+      "description": "Per-user cloud backup and contribution ledger for accurate global aggregation."
+    },
+    "/admin_vault/{secretDocId}": {
+      "schema": {
+        "$ref": "#/entities/AdminApiSecrets"
+      },
+      "description": "Zero-trust admin vault storing API keys in the cloud, readable and writable exclusively by the verified admin."
+    }
+  }
+}
