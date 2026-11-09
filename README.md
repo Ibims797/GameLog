@@ -90,31 +90,6 @@ This repository is designed to be **100% safe for public open-source hosting and
 
 ---
 
-##  Getting Started & Building the APK
-
-### Option 1: Download Ready-to-Install APK (GitHub Actions)
-Every push to the repository automatically triggers the [**.github/workflows/build-apk.yml**](.github/workflows/build-apk.yml) pipeline:
-1. Open the **Actions** tab in your GitHub repository.
-2. Select the latest **Build Android APK** workflow run.
-3. Scroll down to **Artifacts** and download **`StoryGamesTracker-APK`**.
-
-### Option 2: Build Locally via Gradle
-1. Clone this repository:
-   ```bash
-   git clone https://github.com/<your-username>/<your-repo-name>.git
-   cd <your-repo-name>
-   ```
-2. Build the Debug APK:
-   ```bash
-   gradle assembleDebug
-   ```
-3. The compiled APK will be generated at:
-   ```text
-   app/build/outputs/apk/debug/app-debug.apk
-   ```
-
----
-
 ##  Project Structure
 
 ```text
