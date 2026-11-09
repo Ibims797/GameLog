@@ -11,6 +11,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -44,6 +45,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
@@ -65,7 +67,8 @@ import com.example.ui.theme.PlatinumGlowSecondary
 /**
  * Listen-Element für ein Spiel (`LocalGame`).
  * Features:
- * - Zeigt Cover-Bild via Coil (`AsyncImage`), Spieletitel, Bewertung und Status-Icons.
+ * - Passt das Game-Icon / Cover-Bild dynamisch an die Fensterbreite an (`BoxWithConstraints` + `ContentScale.Fit`),
+ *   sodass weder breite Steam-Header noch vertikale IGDB-Cover jemals abgeschnitten werden.
  * - **100% Run Highlighting**: Spiele mit `is100Percent == true` erhalten einen animierten,
  *   leuchtenden Platin/Gold-Glow-Effekt um das gesamte Listen-Element.
  */
@@ -93,7 +96,6 @@ fun GameListCard(
     val glowModifier = if (game.is100Percent) {
         Modifier
             .drawBehind {
-                // Äußerer leuchtender Platin/Gold-Schein um das Listen-Element
                 val glowBrush = Brush.linearGradient(
                     colors = listOf(
                         PlatinumGlowPrimary.copy(alpha = glowAlpha * 0.55f),
@@ -148,197 +150,218 @@ fun GameListCard(
             defaultElevation = if (game.is100Percent) 10.dp else 3.dp
         )
     ) {
-        Row(
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(118.dp)
-                .padding(10.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(10.dp)
         ) {
-            // Cover-Bild (via Coil) mit Status-Badge
-            Box(
-                modifier = Modifier
-                    .width(92.dp)
-                    .fillMaxHeight()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
-            ) {
-                if (game.coverImageUrl.isNotBlank()) {
-                    AsyncImage(
-                        model = game.coverImageUrl,
-                        contentDescription = "Cover von ${game.title}",
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop
-                    )
-                } else {
-                    Icon(
-                        imageVector = Icons.Default.SportsEsports,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier
-                            .size(36.dp)
-                            .align(Alignment.Center)
-                    )
-                }
+            // Passt die Breite und Höhe des Game-Icons automatisch an die Fenstergröße an (ohne Abschneiden)
+            val iconWidth = (maxWidth * 0.27f).coerceIn(88.dp, 124.dp)
+            val iconHeight = (iconWidth * 0.56f).coerceIn(52.dp, 72.dp)
 
-                if (game.is100Percent) {
-                    Surface(
-                        color = Color(0xDD1A1400),
-                        shape = RoundedCornerShape(bottomEnd = 10.dp),
-                        modifier = Modifier.align(Alignment.TopStart)
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Vollständig eingepasstes Game-Icon (via Coil mit ContentScale.Fit - kein Zuschneiden!)
+                Box(
+                    modifier = Modifier
+                        .width(iconWidth)
+                        .height(iconHeight)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .border(
+                            width = 1.dp,
+                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f),
+                            shape = RoundedCornerShape(10.dp)
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (game.coverImageUrl.isNotBlank()) {
+                        // Dezenter abgedunkelter Hintergrund-Schimmer für unterschiedliche Seitenverhältnisse
+                        AsyncImage(
+                            model = game.coverImageUrl,
+                            contentDescription = null,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .alpha(0.22f),
+                            contentScale = ContentScale.Crop
+                        )
+                        // Vollständiges, unbeschnittenes Spiel-Icon
+                        AsyncImage(
+                            model = game.coverImageUrl,
+                            contentDescription = "Cover von ${game.title}",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Fit
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.SportsEsports,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
+
+                    if (game.is100Percent) {
+                        Surface(
+                            color = Color(0xDD1A1400),
+                            shape = RoundedCornerShape(bottomEnd = 8.dp),
+                            modifier = Modifier.align(Alignment.TopStart)
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.EmojiEvents,
-                                contentDescription = "100% Platin Run",
-                                tint = PlatinumGlowPrimary,
-                                modifier = Modifier.size(13.dp)
-                            )
-                            Text(
-                                text = "100%",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = PlatinumGlowPrimary,
-                                fontWeight = FontWeight.Bold
-                            )
+                            Row(
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.EmojiEvents,
+                                    contentDescription = "100% Platin Run",
+                                    tint = PlatinumGlowPrimary,
+                                    modifier = Modifier.size(11.dp)
+                                )
+                                Text(
+                                    text = "100%",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = PlatinumGlowPrimary,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }
-            }
 
-            Spacer(modifier = Modifier.width(14.dp))
+                Spacer(modifier = Modifier.width(12.dp))
 
-            // Titel, Bewertung & Status-Icons
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxHeight(),
-                verticalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column {
-                    Text(
-                        text = game.title,
-                        style = MaterialTheme.typography.titleMedium,
-                        color = if (game.is100Percent) PlatinumGlowPrimary else MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-
-                    val metaLine = buildList {
-                        if (game.genres.isNotBlank()) add(game.genres)
-                        if (game.releaseYear.isNotBlank()) add(game.releaseYear)
-                        if (game.playtimeHours > 0) add("${game.playtimeHours}h")
-                    }.joinToString(" • ")
-
-                    if (metaLine.isNotBlank()) {
+                // Titel, Bewertung & Status-Icons
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Column {
                         Text(
-                            text = metaLine,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            text = game.title,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = if (game.is100Percent) PlatinumGlowPrimary else MaterialTheme.colorScheme.onSurface,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
-                    }
-                }
 
-                // 5-Sterne Anzeige
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
-                    for (star in 1..5) {
-                        Icon(
-                            imageVector = if (star <= game.personalRating) {
-                                Icons.Filled.Star
-                            } else {
-                                Icons.Outlined.StarOutline
-                            },
-                            contentDescription = null,
-                            tint = if (star <= game.personalRating) {
-                                PlatinumGlowPrimary
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
-                            },
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                    if (game.personalRating > 0) {
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = "${game.personalRating}/5",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
+                        val metaLine = buildList {
+                            if (game.genres.isNotBlank()) add(game.genres)
+                            if (game.releaseYear.isNotBlank()) add(game.releaseYear)
+                            if (game.playtimeHours > 0) add("${game.playtimeHours}h")
+                        }.joinToString(" • ")
 
-                // Status-Pills (Gespielt, Empfohlen, 100% Platin)
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    StatusBadgePill(
-                        icon = if (game.isOwned) Icons.Default.CheckCircle else Icons.Default.Bookmark,
-                        label = if (!game.isOwned) "Wunschliste" else if (game.isPlayed) "Gespielt" else "Backlog",
-                        tint = if (game.isPlayed) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                        if (metaLine.isNotBlank()) {
+                            Text(
+                                text = metaLine,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
 
-                    if (game.isRecommended) {
+                    // 5-Sterne Anzeige
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        for (star in 1..5) {
+                            Icon(
+                                imageVector = if (star <= game.personalRating) {
+                                    Icons.Filled.Star
+                                } else {
+                                    Icons.Outlined.StarOutline
+                                },
+                                contentDescription = null,
+                                tint = if (star <= game.personalRating) {
+                                    PlatinumGlowPrimary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
+                                },
+                                modifier = Modifier.size(15.dp)
+                            )
+                        }
+                        if (game.personalRating > 0) {
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "${game.personalRating}/5",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    // Status-Pills (Gespielt, Empfohlen, 100% Platin)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         StatusBadgePill(
-                            icon = Icons.Default.ThumbUp,
-                            label = "Empfohlen",
-                            tint = MaterialTheme.colorScheme.primary
+                            icon = if (game.isOwned) Icons.Default.CheckCircle else Icons.Default.Bookmark,
+                            label = if (!game.isOwned) "Wunschliste" else if (game.isPlayed) "Gespielt" else "Backlog",
+                            tint = if (game.isPlayed) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurfaceVariant
                         )
+
+                        if (game.isRecommended) {
+                            StatusBadgePill(
+                                icon = Icons.Default.ThumbUp,
+                                label = "Empfohlen",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
                     }
                 }
-            }
 
-            // Schnell-Aktion rechts (100% Trophy Toggle oder "In Bibliothek verschieben")
-            Column(
-                horizontalAlignment = Alignment.End,
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                FilledTonalIconButton(
-                    onClick = onQuickToggle100Percent,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .testTag("quick_100_button_${game.id}"),
-                    shape = CircleShape,
-                    colors = IconButtonDefaults.filledTonalIconButtonColors(
-                        containerColor = if (game.is100Percent) {
-                            PlatinumGlowPrimary.copy(alpha = 0.24f)
-                        } else {
-                            MaterialTheme.colorScheme.surfaceVariant
-                        }
-                    )
+                Spacer(modifier = Modifier.width(6.dp))
+
+                // Schnell-Aktion rechts (100% Trophy Toggle oder "In Bibliothek verschieben")
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.EmojiEvents,
-                        contentDescription = "100% Run umschalten",
-                        tint = if (game.is100Percent) {
-                            PlatinumGlowPrimary
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        }
-                    )
-                }
-
-                if (onMoveToLibrary != null && !game.isOwned) {
                     FilledTonalIconButton(
-                        onClick = onMoveToLibrary,
+                        onClick = onQuickToggle100Percent,
                         modifier = Modifier
                             .size(48.dp)
-                            .testTag("move_to_library_button_${game.id}"),
-                        shape = CircleShape
+                            .testTag("quick_100_button_${game.id}"),
+                        shape = CircleShape,
+                        colors = IconButtonDefaults.filledTonalIconButtonColors(
+                            containerColor = if (game.is100Percent) {
+                                PlatinumGlowPrimary.copy(alpha = 0.24f)
+                            } else {
+                                MaterialTheme.colorScheme.surfaceVariant
+                            }
+                        )
                     ) {
                         Icon(
-                            imageVector = Icons.Default.ShoppingCartCheckout,
-                            contentDescription = "In Meine Bibliothek übernehmen",
-                            tint = MaterialTheme.colorScheme.primary
+                            imageVector = Icons.Default.EmojiEvents,
+                            contentDescription = "100% Run umschalten",
+                            tint = if (game.is100Percent) {
+                                PlatinumGlowPrimary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
                         )
+                    }
+
+                    if (onMoveToLibrary != null && !game.isOwned) {
+                        FilledTonalIconButton(
+                            onClick = onMoveToLibrary,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("move_to_library_button_${game.id}"),
+                            shape = CircleShape
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ShoppingCartCheckout,
+                                contentDescription = "In Meine Bibliothek übernehmen",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
                     }
                 }
             }

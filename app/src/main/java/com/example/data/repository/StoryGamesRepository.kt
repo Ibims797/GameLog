@@ -1,5 +1,6 @@
 package com.example.data.repository
 
+import com.example.config.AppConfig
 import com.example.data.cloud.AdminApiSecrets
 import com.example.data.cloud.CloudGameRepository
 import com.example.data.cloud.GlobalGameStats
@@ -12,6 +13,11 @@ import com.example.data.remote.SteamAchievementSerializer
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import kotlinx.coroutines.flow.Flow
+
+data class LiveWishlistSyncSummary(
+    val totalCount: Int,
+    val newlyAddedTitles: List<String>
+)
 
 /**
  * Zentrales Hybrid-Repository (Room lokal + Firebase Cloud-Sync + IGDB/Steam Retrofit + Cloud Admin Vault).
@@ -30,7 +36,6 @@ class StoryGamesRepository(
 
     /**
      * Prüft, ob aktuell ein verifiziertes Google-Konto angemeldet ist.
-     * Nur mit Google-Anmeldung sind Cloud-Bewertungen, Empfehlungen und das Community-Ranking aktiv.
      */
     fun isGoogleSignedIn(): Boolean = Firebase.auth.currentUser != null
 
@@ -53,7 +58,6 @@ class StoryGamesRepository(
 
     /**
      * Speichert die API-Keys im geschützten Cloud-Tresor (`/admin_vault/api_secrets`).
-     * Nur für den verifizierten Admin (`nico.schaefer.hn@gmail.com`) zugänglich.
      */
     suspend fun saveAdminVaultSecrets(
         twitchClientId: String,
@@ -68,8 +72,15 @@ class StoryGamesRepository(
     }
 
     /**
-     * Synchronisiert bei App-Start vorhandene Cloud-Einträge des Nutzers in die lokale Room-Datenbank,
-     * falls der Nutzer mit Google angemeldet ist.
+     * Exklusive Admin-Funktion (`nico.schaefer.hn@gmail.com`):
+     * Löscht ein Spiel aus dem globalen Community-Ranking (`/global_game_stats/{gameId}`).
+     */
+    suspend fun deleteGameFromCommunityRankingAsAdmin(gameId: String): Result<Unit> {
+        return cloudRepository.deleteGameFromCommunityRanking(gameId)
+    }
+
+    /**
+     * Synchronisiert bei App-Start vorhandene Cloud-Einträge des Nutzers in die lokale Room-Datenbank.
      */
     suspend fun restoreUserCloudBackupIfNeeded() {
         if (!isGoogleSignedIn()) return
@@ -98,7 +109,7 @@ class StoryGamesRepository(
     }
 
     /**
-     * Speichert ein Spiel lokal in Room (für Offline- & Steam-Modus).
+     * Speichert ein Spiel lokal in Room (ohne es ins Community-Ranking einzutragen).
      */
     suspend fun saveGameLocally(game: LocalGame): LocalGame {
         val updatedGame = game.copy(updatedAtEpoch = System.currentTimeMillis())
@@ -107,8 +118,9 @@ class StoryGamesRepository(
     }
 
     /**
-     * Speichert oder aktualisiert ein Spiel lokal in Room und synchronisiert es (sofern mit Google angemeldet)
-     * direkt mit `GlobalGameStats` in Firestore.
+     * Speichert oder aktualisiert ein Spiel lokal in Room und synchronisiert es mit der Cloud.
+     * WICHTIG: In `GlobalGameStats` (Community-Ranking) wird das Spiel NUR eingetragen/aktualisiert,
+     * wenn eine Bewertung (`personalRating > 0`) oder eine Weiterempfehlung (`isRecommended == true`) vorliegt!
      */
     suspend fun saveGameAndSyncToCloud(game: LocalGame): Result<GlobalGameStats> {
         val updatedGame = game.copy(updatedAtEpoch = System.currentTimeMillis())
@@ -119,6 +131,7 @@ class StoryGamesRepository(
     /**
      * Fügt ein Suchergebnis aus IGDB / Steam zur eigenen Bibliothek (`isOwned = true`)
      * oder zur Wunschliste (`isOwned = false`) hinzu.
+     * WICHTIG: Bloßes Hinzufügen zur Bibliothek oder Wunschliste fügt das Spiel NICHT zum Community-Ranking hinzu!
      */
     suspend fun addSearchResultToCollection(
         result: ExternalGameSearchResult,
@@ -146,9 +159,6 @@ class StoryGamesRepository(
             )
         }
         gameDao.upsertGame(newGame)
-        if (isGoogleSignedIn()) {
-            cloudRepository.syncGameToCloud(newGame)
-        }
         return newGame
     }
 
@@ -161,9 +171,6 @@ class StoryGamesRepository(
             updatedAtEpoch = System.currentTimeMillis()
         )
         gameDao.upsertGame(updated)
-        if (isGoogleSignedIn()) {
-            cloudRepository.syncGameToCloud(updated)
-        }
     }
 
     suspend fun deleteLocalGame(gameId: String) {
@@ -171,20 +178,43 @@ class StoryGamesRepository(
     }
 
     suspend fun searchExternalGames(query: String): Result<List<ExternalGameSearchResult>> {
+        if (isCurrentUserAdmin() && AppConfig.TWITCH_CLIENT_ID.isBlank()) {
+            loadAdminVaultSecrets()
+        }
         return externalRepository.searchGames(query)
     }
 
+    private suspend fun buildKnownSteamTitlesMap(): Map<Long, String> {
+        return gameDao.getAllGamesSnapshot()
+            .mapNotNull { game ->
+                val appId = game.id.removePrefix("steam_").toLongOrNull() ?: return@mapNotNull null
+                if (game.title.isNotBlank() && !game.title.startsWith("Steam App #")) {
+                    appId to game.title
+                } else null
+            }
+            .toMap()
+    }
+
     /**
-     * Importiert die Steam-Spielebibliothek (Owned Games) und speichert sie in Room.
+     * Importiert ALLE Spiele aus der Steam-Spielebibliothek (Owned Games) und speichert sie in Room.
      */
     suspend fun importSteamLibrary(steamIdInput: String): Result<Int> {
-        val result = externalRepository.importSteamOwnedGames(steamIdInput)
+        if (isCurrentUserAdmin() && AppConfig.STEAM_API_KEY.isBlank()) {
+            loadAdminVaultSecrets()
+        }
+        val knownTitles = buildKnownSteamTitlesMap()
+        val result = externalRepository.importSteamOwnedGames(steamIdInput, knownTitles)
         return result.map { importedList ->
             val existingMap = gameDao.getAllGamesSnapshot().associateBy { it.id }
             val merged = importedList.map { imported ->
                 val prev = existingMap[imported.id]
                 if (prev != null) {
                     prev.copy(
+                        title = if (imported.title.startsWith("Steam App #") && !prev.title.startsWith("Steam App #")) {
+                            prev.title
+                        } else {
+                            imported.title
+                        },
                         isOwned = true,
                         playtimeHours = maxOf(prev.playtimeHours, imported.playtimeHours),
                         isPlayed = prev.isPlayed || imported.isPlayed,
@@ -200,35 +230,61 @@ class StoryGamesRepository(
     }
 
     /**
-     * Importiert die Steam-Wunschliste (`isOwned = false`) und speichert sie in Room.
+     * Importiert ALLE Spiele aus der Steam-Wunschliste (`isOwned = false`) und gibt zurück,
+     * welche neuen Spiele im Vergleich zum bisherigen lokalen Stand hinzugekommen sind (für den Live-Updater).
      */
-    suspend fun importSteamWishlist(steamIdInput: String): Result<Int> {
-        val result = externalRepository.importSteamWishlist(steamIdInput)
+    suspend fun importSteamWishlistWithDiff(steamIdInput: String): Result<LiveWishlistSyncSummary> {
+        if (isCurrentUserAdmin() && AppConfig.STEAM_API_KEY.isBlank()) {
+            loadAdminVaultSecrets()
+        }
+        val existingSnapshot = gameDao.getAllGamesSnapshot()
+        val existingMap = existingSnapshot.associateBy { it.id }
+        val knownTitles = buildKnownSteamTitlesMap()
+
+        val result = externalRepository.importSteamWishlist(steamIdInput, knownTitles)
         return result.map { importedList ->
-            val existingMap = gameDao.getAllGamesSnapshot().associateBy { it.id }
+            val newlyAddedTitles = mutableListOf<String>()
             val newWishlistGames = importedList.mapNotNull { imported ->
                 val prev = existingMap[imported.id]
                 when {
-                    prev == null -> imported
-                    !prev.isOwned -> prev.copy(updatedAtEpoch = System.currentTimeMillis())
+                    prev == null -> {
+                        newlyAddedTitles.add(imported.title)
+                        imported
+                    }
+                    !prev.isOwned -> {
+                        prev.copy(
+                            title = if (!imported.title.startsWith("Steam App #")) imported.title else prev.title,
+                            coverImageUrl = imported.coverImageUrl.ifBlank { prev.coverImageUrl },
+                            updatedAtEpoch = System.currentTimeMillis()
+                        )
+                    }
                     else -> null
                 }
             }
             if (newWishlistGames.isNotEmpty()) {
                 gameDao.upsertGames(newWishlistGames)
             }
-            newWishlistGames.size
+            LiveWishlistSyncSummary(
+                totalCount = newWishlistGames.size,
+                newlyAddedTitles = newlyAddedTitles
+            )
         }
     }
 
+    suspend fun importSteamWishlist(steamIdInput: String): Result<Int> {
+        return importSteamWishlistWithDiff(steamIdInput).map { it.totalCount }
+    }
+
     /**
-     * Lädt die Steam-Errungenschaften eines Spiels und speichert sie lokal in `LocalGame.achievementsJson`,
-     * damit sie auch im Offline-Modus sofort zur Verfügung stehen.
+     * Lädt die Steam-Errungenschaften eines Spiels und speichert sie lokal in `LocalGame.achievementsJson`.
      */
     suspend fun fetchAndCacheGameAchievements(
         game: LocalGame,
         steamIdInput: String
     ): Result<List<SteamAchievement>> {
+        if (isCurrentUserAdmin() && AppConfig.STEAM_API_KEY.isBlank()) {
+            loadAdminVaultSecrets()
+        }
         val result = externalRepository.fetchGameAchievements(game, steamIdInput)
         result.onSuccess { achievements ->
             if (achievements.isNotEmpty()) {

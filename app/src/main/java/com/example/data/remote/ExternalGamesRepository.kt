@@ -1,10 +1,14 @@
 package com.example.data.remote
 
+import android.text.Html
 import com.example.config.AppConfig
 import com.example.data.local.LocalGame
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -16,6 +20,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
+import java.net.URLEncoder
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
@@ -23,7 +28,7 @@ import java.util.concurrent.TimeUnit
  * Modular aufgebautes Repository für die IGDB API (via Twitch OAuth2) und Steam Web/Store/Community APIs.
  * Unterstützt:
  * 1. IGDB API v4 Spielesuche (mit Twitch OAuth2 Token-Cache & Steam Store Fallback)
- * 2. Steam Owned Games (Bibliothek) & Wishlist Import (via API-Key UND öffentlichem Steam-Community-Fallback)
+ * 2. Vollständigen Steam Owned Games (Bibliothek) & Wishlist Import (alle 250+ Spiele ohne Limitierung)
  * 3. Steam Errungenschaften (Achievements) inkl. Unterscheidung in "Erreicht" / "Fehlt noch" und Spoiler-Schutz.
  */
 class ExternalGamesRepository {
@@ -33,8 +38,8 @@ class ExternalGamesRepository {
         .build()
 
     private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(25, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .addInterceptor { chain ->
@@ -44,6 +49,7 @@ class ExternalGamesRepository {
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
                 )
                 .header("Accept-Language", "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7")
+                .header("Cookie", "birthtime=0; mature_content=1; lastagecheckage=1-0-1990; wants_mature_content=1")
                 .build()
             chain.proceed(req)
         }
@@ -85,7 +91,6 @@ class ExternalGamesRepository {
             .create(SteamStoreApiService::class.java)
     }
 
-    // In-Memory Cache für den Twitch OAuth2 Access Token
     private val tokenMutex = Mutex()
     @Volatile
     private var cachedAccessToken: String? = null
@@ -150,7 +155,6 @@ class ExternalGamesRepository {
     /**
      * Sucht nach Spielen über die IGDB API v4 mit Apicalypse Plain-Text-Syntax:
      * `search "SUCHBEGRIFF"; fields name, cover.image_id; limit 20;`
-     * Fällt automatisch auf die öffentliche Steam Store API zurück, wenn keine IGDB-Keys im RAM sind.
      */
     suspend fun searchGames(query: String): Result<List<ExternalGameSearchResult>> = withContext(Dispatchers.IO) {
         val trimmed = query.trim()
@@ -240,7 +244,13 @@ class ExternalGamesRepository {
             return@withContext directMatch
         }
 
-        val cleaned = trimmed.substringAfterLast("/").trim()
+        val cleaned = trimmed
+            .substringBefore("?")
+            .removeSuffix("/games")
+            .removeSuffix("/wishlist")
+            .removeSuffix("/")
+            .substringAfterLast("/")
+            .trim()
         if (cleaned.isBlank()) return@withContext ""
 
         val steamKey = AppConfig.STEAM_API_KEY
@@ -255,10 +265,19 @@ class ExternalGamesRepository {
             }
         }
 
-        // Öffentlicher Fallback über Steam Community XML-Profil (auch ohne STEAM_API_KEY)
         val xml = httpGetString("https://steamcommunity.com/id/$cleaned/?xml=1")
         if (!xml.isNullOrBlank()) {
             val match = Regex("<steamID64>(\\d{17})</steamID64>").find(xml)
+            val extractedId = match?.groupValues?.getOrNull(1)
+            if (!extractedId.isNullOrBlank()) {
+                return@withContext extractedId
+            }
+        }
+
+        val html = httpGetString("https://steamcommunity.com/id/$cleaned")
+        if (!html.isNullOrBlank()) {
+            val match = Regex("\"steamid\"\\s*:\\s*\"(\\d{17})\"").find(html)
+                ?: Regex("g_rgProfileData\\s*=\\s*\\{[^}]*\"steamid\"\\s*:\\s*\"(\\d{17})\"").find(html)
             val extractedId = match?.groupValues?.getOrNull(1)
             if (!extractedId.isNullOrBlank()) {
                 return@withContext extractedId
@@ -269,13 +288,17 @@ class ExternalGamesRepository {
     }
 
     /**
-     * Importiert die eigene Steam-Spielebibliothek (Owned Games) über die Steam-ID des Nutzers.
-     * Unterstützt 3 Stufen, damit die Bibliothek zuverlässig geladen wird:
-     * 1. Offizielle Steam Web API (`IPlayerService/GetOwnedGames`), falls `STEAM_API_KEY` vorhanden.
-     * 2. Steam Community `data-profile-gameslist` JSON-Extraktion (`https://steamcommunity.com/profiles/{id}/games/?tab=all`).
-     * 3. Steam Community XML-Feed (`?tab=all&xml=1` & `?xml=1`).
+     * Importiert ALLE Spiele (z.B. 250+ Titel) aus der eigenen Steam-Spielebibliothek (Owned Games):
+     * Kombiniert:
+     * 1. `IPlayerService/GetOwnedGames/v1/` (mit `input_json` inkl. `include_free_sub=true` & `skip_unvetted_apps=false`)
+     * 2. `IPlayerService/GetOwnedGames/v0001/` (klassische Parameter als Backup)
+     * 3. Steam Community HTML `data-profile-gameslist` (mit verlustfreiem JSON-Unescaping ohne `Html.fromHtml`-Korruption + Regex-Fallback)
+     * 4. Steam Community XML `/games/?tab=all&xml=1`
      */
-    suspend fun importSteamOwnedGames(rawSteamIdInput: String): Result<List<LocalGame>> = withContext(Dispatchers.IO) {
+    suspend fun importSteamOwnedGames(
+        rawSteamIdInput: String,
+        knownTitles: Map<Long, String> = emptyMap()
+    ): Result<List<LocalGame>> = withContext(Dispatchers.IO) {
         val steamId64 = normalizeSteamId64(rawSteamIdInput)
         if (!steamId64.matches(Regex("^\\d{17}$"))) {
             return@withContext Result.failure(
@@ -285,51 +308,130 @@ class ExternalGamesRepository {
             )
         }
 
-        // Stufe 1: Offizielle Steam Web API (falls Admin-Key im RAM geladen)
-        val steamKey = AppConfig.STEAM_API_KEY
-        if (steamKey.isNotBlank()) {
-            try {
-                val envelope = steamService.getOwnedGames(
-                    apiKey = steamKey,
-                    steamId = steamId64
-                )
-                val gamesDto = envelope.response?.games.orEmpty()
-                if (gamesDto.isNotEmpty()) {
-                    val importedGames = gamesDto.mapNotNull { dto ->
-                        val title = dto.name?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                        val playtimeHours = (dto.playtimeForeverMinutes ?: 0) / 60
-                        LocalGame(
-                            id = "steam_${dto.appId}",
-                            title = title,
-                            coverImageUrl = AppConfig.getSteamHeaderImageUrl(dto.appId),
-                            isPlayed = (dto.playtimeForeverMinutes ?: 0) > 30,
-                            isOwned = true,
-                            is100Percent = false,
-                            personalRating = 0,
-                            personalNote = if (playtimeHours > 0) "Steam Import ($playtimeHours Std. Spielzeit)" else "Steam Bibliothek Import",
-                            isRecommended = false,
-                            genres = "Steam Library",
-                            playtimeHours = playtimeHours
-                        )
-                    }
-                    if (importedGames.isNotEmpty()) {
-                        return@withContext Result.success(importedGames)
-                    }
+        val combinedByAppId = LinkedHashMap<Long, LocalGame>()
+
+        fun mergeGameEntry(game: LocalGame) {
+            val appId = game.id.removePrefix("steam_").toLongOrNull() ?: return
+            val existing = combinedByAppId[appId]
+            if (existing == null) {
+                combinedByAppId[appId] = game
+            } else {
+                val betterTitle = when {
+                    !existing.title.startsWith("Steam App #") && existing.title.isNotBlank() -> existing.title
+                    !game.title.startsWith("Steam App #") && game.title.isNotBlank() -> game.title
+                    else -> existing.title
                 }
-            } catch (_: Exception) {
+                val maxHours = maxOf(existing.playtimeHours, game.playtimeHours)
+                combinedByAppId[appId] = existing.copy(
+                    title = betterTitle,
+                    playtimeHours = maxHours,
+                    isPlayed = existing.isPlayed || game.isPlayed || maxHours > 0,
+                    personalNote = if (maxHours > 0) "Steam Import ($maxHours Std. Spielzeit)" else existing.personalNote
+                )
             }
         }
 
-        // Stufe 2: Öffentlicher Steam Community HTML/JSON Parser (`data-profile-gameslist`)
-        val htmlGames = parseSteamCommunityHtmlGamesList(steamId64)
-        if (htmlGames.isNotEmpty()) {
-            return@withContext Result.success(htmlGames)
+        // Quelle 1: Offizielle Steam Web API (`IPlayerService/GetOwnedGames/v1/` mit `input_json` + `/v0001/`)
+        val steamKey = AppConfig.STEAM_API_KEY
+        if (steamKey.isNotBlank()) {
+            // 1A: v1 mit vollständigem input_json (enthält ALLE gekauften, F2P-, Sub- und Unvetted-Spiele)
+            try {
+                val inputJson = """{"steamid":"$steamId64","include_appinfo":true,"include_played_free_games":true,"include_free_sub":true,"skip_unvetted_apps":false}"""
+                val encodedJson = URLEncoder.encode(inputJson, "UTF-8")
+                val v1Url = "${AppConfig.STEAM_API_BASE_URL}IPlayerService/GetOwnedGames/v1/?key=$steamKey&input_json=$encodedJson&format=json"
+                val v1Body = httpGetString(v1Url)
+                if (!v1Body.isNullOrBlank()) {
+                    parseOwnedGamesApiJson(v1Body, knownTitles).forEach(::mergeGameEntry)
+                }
+            } catch (_: Exception) {
+            }
+
+            // 1B: v0001 Standard-Query-Parameter (falls v1 leer war oder einzelne Apps fehlten)
+            try {
+                val v0001Url = "${AppConfig.STEAM_API_BASE_URL}IPlayerService/GetOwnedGames/v0001/?key=$steamKey&steamid=$steamId64&include_appinfo=1&include_played_free_games=1&format=json"
+                val v0001Body = httpGetString(v0001Url)
+                if (!v0001Body.isNullOrBlank()) {
+                    parseOwnedGamesApiJson(v0001Body, knownTitles).forEach(::mergeGameEntry)
+                }
+            } catch (_: Exception) {
+            }
+
+            // 1C: Retrofit-Backup
+            if (combinedByAppId.isEmpty()) {
+                try {
+                    val envelope = steamService.getOwnedGames(
+                        apiKey = steamKey,
+                        steamId = steamId64,
+                        includeAppInfo = 1,
+                        includePlayedFreeGames = 1
+                    )
+                    envelope.response?.games.orEmpty().forEach { dto ->
+                        if (dto.appId > 0L) {
+                            val title = dto.name?.takeIf { it.isNotBlank() }
+                                ?: knownTitles[dto.appId]
+                                ?: "Steam App #${dto.appId}"
+                            val playtimeHours = (dto.playtimeForeverMinutes ?: 0) / 60
+                            mergeGameEntry(
+                                LocalGame(
+                                    id = "steam_${dto.appId}",
+                                    title = title.trim(),
+                                    coverImageUrl = AppConfig.getSteamHeaderImageUrl(dto.appId),
+                                    isPlayed = (dto.playtimeForeverMinutes ?: 0) > 30,
+                                    isOwned = true,
+                                    is100Percent = false,
+                                    personalRating = 0,
+                                    personalNote = if (playtimeHours > 0) "Steam Import ($playtimeHours Std. Spielzeit)" else "Steam Bibliothek Import",
+                                    isRecommended = false,
+                                    genres = "Steam Library",
+                                    playtimeHours = playtimeHours
+                                )
+                            )
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+            }
         }
 
-        // Stufe 3: Öffentlicher Steam Community XML Games-Feed (`?tab=all&xml=1` + Profil-XML)
-        val xmlGames = parseSteamCommunityXmlGamesList(steamId64)
-        if (xmlGames.isNotEmpty()) {
-            return@withContext Result.success(xmlGames)
+        // Quelle 2: Vollständige Steam Community HTML/JSON `data-profile-gameslist` (liefert alle 250+ Spiele auch ohne API-Key!)
+        val htmlGames = parseSteamCommunityHtmlGamesList(steamId64, rawSteamIdInput, knownTitles)
+        htmlGames.forEach(::mergeGameEntry)
+
+        // Quelle 3: Öffentlicher Steam Community XML Games-Feed (`/games/?tab=all&xml=1` mit Schrägstrich!)
+        val xmlGames = parseSteamCommunityXmlGamesList(steamId64, includeProfileSummaryFallback = combinedByAppId.isEmpty())
+        xmlGames.forEach(::mergeGameEntry)
+
+        // Falls einzelne Spiele noch keinen aufgelösten Namen haben ("Steam App #..."), parallel über Store API nachladen
+        val unresolvedAppIds = combinedByAppId.entries
+            .filter { it.value.title.startsWith("Steam App #") }
+            .map { it.key }
+
+        if (unresolvedAppIds.isNotEmpty()) {
+            coroutineScope {
+                unresolvedAppIds.take(60).chunked(10).forEach { chunk ->
+                    val resolvedPairs = chunk.map { appId ->
+                        async {
+                            val title = knownTitles[appId] ?: resolveSteamAppTitle(appId)
+                            if (!title.isNullOrBlank()) appId to title else null
+                        }
+                    }.awaitAll().filterNotNull()
+
+                    resolvedPairs.forEach { (appId, resolvedTitle) ->
+                        val current = combinedByAppId[appId]
+                        if (current != null) {
+                            combinedByAppId[appId] = current.copy(title = resolvedTitle.trim())
+                        }
+                    }
+                }
+            }
+        }
+
+        if (combinedByAppId.isNotEmpty()) {
+            val sortedList = combinedByAppId.values.sortedWith(
+                compareByDescending<LocalGame> { it.playtimeHours }
+                    .thenBy { it.title.lowercase(Locale.ROOT) }
+            )
+            return@withContext Result.success(sortedList)
         }
 
         Result.failure(
@@ -339,62 +441,300 @@ class ExternalGamesRepository {
         )
     }
 
-    private fun parseSteamCommunityHtmlGamesList(steamId64: String): List<LocalGame> {
-        val html = httpGetString("https://steamcommunity.com/profiles/$steamId64/games/?tab=all&l=german")
-            ?: return emptyList()
-
-        val result = mutableListOf<LocalGame>()
+    private fun parseOwnedGamesApiJson(
+        rawJson: String,
+        knownTitles: Map<Long, String>
+    ): List<LocalGame> {
+        val list = mutableListOf<LocalGame>()
         try {
-            // Moderne Steam-Seiten betten `data-profile-gameslist="{&quot;rgGames&quot;:[...]}"` ein
-            val attrRegex = Regex("""data-profile-gameslist="([^"]+)"""")
-            val rawAttr = attrRegex.find(html)?.groupValues?.getOrNull(1)
-            val jsonCandidate = when {
-                !rawAttr.isNullOrBlank() -> decodeHtmlEntities(rawAttr)
-                html.contains("var rgGames =") -> {
-                    val arrStr = html.substringAfter("var rgGames =").substringBefore("];") + "]"
-                    """{"rgGames":$arrStr}"""
+            val root = JSONObject(rawJson)
+            val responseObj = root.optJSONObject("response") ?: root
+            val gamesArr = responseObj.optJSONArray("games") ?: return emptyList()
+            for (i in 0 until gamesArr.length()) {
+                val obj = gamesArr.optJSONObject(i) ?: continue
+                val appId = obj.optLong("appid", 0L)
+                if (appId <= 0L) continue
+                val rawName = obj.optString("name", "").trim()
+                val title = rawName.ifBlank {
+                    knownTitles[appId] ?: "Steam App #$appId"
                 }
-                else -> null
-            }
-
-            if (!jsonCandidate.isNullOrBlank()) {
-                val root = JSONObject(jsonCandidate)
-                val rgGames = root.optJSONArray("rgGames") ?: JSONArray()
-                for (i in 0 until rgGames.length()) {
-                    val obj = rgGames.optJSONObject(i) ?: continue
-                    val appId = obj.optLong("appid", 0L)
-                    val name = obj.optString("name", "").trim()
-                    val playtimeForever = obj.optInt("playtime_forever", 0)
-                    val playtimeHours = playtimeForever / 60
-                    if (appId > 0L && name.isNotBlank()) {
-                        result.add(
-                            LocalGame(
-                                id = "steam_$appId",
-                                title = name,
-                                coverImageUrl = AppConfig.getSteamHeaderImageUrl(appId),
-                                isPlayed = playtimeForever > 30,
-                                isOwned = true,
-                                is100Percent = false,
-                                personalRating = 0,
-                                personalNote = if (playtimeHours > 0) "Steam Import ($playtimeHours Std. Spielzeit)" else "Steam Bibliothek Import",
-                                isRecommended = false,
-                                genres = "Steam Library",
-                                playtimeHours = playtimeHours
-                            )
-                        )
-                    }
-                }
+                val playtimeMinutes = obj.optInt("playtime_forever", 0)
+                val playtimeHours = playtimeMinutes / 60
+                list.add(
+                    LocalGame(
+                        id = "steam_$appId",
+                        title = title,
+                        coverImageUrl = AppConfig.getSteamHeaderImageUrl(appId),
+                        isPlayed = playtimeMinutes > 30,
+                        isOwned = true,
+                        is100Percent = false,
+                        personalRating = 0,
+                        personalNote = if (playtimeHours > 0) "Steam Import ($playtimeHours Std. Spielzeit)" else "Steam Bibliothek Import",
+                        isRecommended = false,
+                        genres = "Steam Library",
+                        playtimeHours = playtimeHours
+                    )
+                )
             }
         } catch (_: Exception) {
         }
-        return result
+        return list
     }
 
-    private fun parseSteamCommunityXmlGamesList(steamId64: String): List<LocalGame> {
-        val urlsToTry = listOf(
-            "https://steamcommunity.com/profiles/$steamId64/games?tab=all&xml=1",
-            "https://steamcommunity.com/profiles/$steamId64/?xml=1"
+    private fun parseSteamCommunityHtmlGamesList(
+        steamId64: String,
+        rawInput: String,
+        knownTitles: Map<Long, String>
+    ): List<LocalGame> {
+        val cleanedVanity = rawInput.trim()
+            .removeSuffix("/")
+            .substringAfterLast("/")
+            .trim()
+            .takeIf { it.isNotBlank() && !it.matches(Regex("^\\d{17}$")) }
+
+        val urls = buildList {
+            add("https://steamcommunity.com/profiles/$steamId64/games/?tab=all&l=german")
+            add("https://steamcommunity.com/profiles/$steamId64/games/?tab=all")
+            if (cleanedVanity != null) {
+                add("https://steamcommunity.com/id/$cleanedVanity/games/?tab=all&l=german")
+                add("https://steamcommunity.com/id/$cleanedVanity/games/?tab=all")
+            }
+        }
+
+        val result = LinkedHashMap<Long, LocalGame>()
+
+        for (url in urls) {
+            val html = httpGetString(url) ?: continue
+            val jsonCandidate = extractGamesListJsonFromHtml(html)
+            if (!jsonCandidate.isNullOrBlank()) {
+                // 1. Primärer JSON-Parser für rgGames
+                try {
+                    val root = JSONObject(jsonCandidate)
+                    val rgGames = root.optJSONArray("rgGames")
+                    if (rgGames != null && rgGames.length() > 0) {
+                        parseRgGamesJsonArray(rgGames, knownTitles).forEach { game ->
+                            val appId = game.id.removePrefix("steam_").toLongOrNull()
+                            if (appId != null) result[appId] = game
+                        }
+                    }
+                } catch (_: Exception) {
+                    // Falls das äußere JSONObject wegen Sonderzeichen fehlschlägt, direkt das rgGames-Array extrahieren
+                    try {
+                        val rgStart = jsonCandidate.indexOf("\"rgGames\":")
+                        if (rgStart >= 0) {
+                            val arrStart = jsonCandidate.indexOf('[', rgStart)
+                            if (arrStart >= 0) {
+                                val arrJson = extractBalancedJsonArray(jsonCandidate, arrStart)
+                                if (!arrJson.isNullOrBlank()) {
+                                    val rgGames = JSONArray(arrJson)
+                                    parseRgGamesJsonArray(rgGames, knownTitles).forEach { game ->
+                                        val appId = game.id.removePrefix("steam_").toLongOrNull()
+                                        if (appId != null) result[appId] = game
+                                    }
+                                }
+                            }
+                        }
+                    } catch (_: Exception) {
+                    }
+                }
+
+                // 2. Zusätzlicher Regex-Scanner über jsonCandidate (garantiert, dass keines der 250 Spiele durch Sonderzeichen verloren geht)
+                extractRgGamesViaRegex(jsonCandidate, knownTitles).forEach { game ->
+                    val appId = game.id.removePrefix("steam_").toLongOrNull()
+                    if (appId != null && !result.containsKey(appId)) {
+                        result[appId] = game
+                    }
+                }
+            }
+
+            if (result.size > 20) break
+        }
+        return result.values.toList()
+    }
+
+    private fun parseRgGamesJsonArray(
+        rgGames: JSONArray,
+        knownTitles: Map<Long, String>
+    ): List<LocalGame> {
+        val list = mutableListOf<LocalGame>()
+        for (i in 0 until rgGames.length()) {
+            val obj = rgGames.optJSONObject(i) ?: continue
+            val appId = obj.optLong("appid", 0L)
+            if (appId <= 0L) continue
+            val rawName = obj.optString("name", "").trim()
+            val name = decodeHtmlEntities(rawName).ifBlank {
+                knownTitles[appId] ?: "Steam App #$appId"
+            }
+            val playtimeForeverMinutes = obj.optInt("playtime_forever", -1)
+            val playtimeHours = if (playtimeForeverMinutes >= 0) {
+                playtimeForeverMinutes / 60
+            } else {
+                val hoursStr = obj.optString("hours_forever", "").replace(",", "").trim()
+                hoursStr.toDoubleOrNull()?.toInt() ?: 0
+            }
+            val isPlayed = if (playtimeForeverMinutes >= 0) {
+                playtimeForeverMinutes > 30
+            } else {
+                playtimeHours > 0
+            }
+
+            list.add(
+                LocalGame(
+                    id = "steam_$appId",
+                    title = name,
+                    coverImageUrl = AppConfig.getSteamHeaderImageUrl(appId),
+                    isPlayed = isPlayed,
+                    isOwned = true,
+                    is100Percent = false,
+                    personalRating = 0,
+                    personalNote = if (playtimeHours > 0) "Steam Import ($playtimeHours Std. Spielzeit)" else "Steam Bibliothek Import",
+                    isRecommended = false,
+                    genres = "Steam Library",
+                    playtimeHours = playtimeHours
+                )
+            )
+        }
+        return list
+    }
+
+    /**
+     * Verlustfreies Unescaping für ein HTML-Attribut (`data-profile-gameslist="..."`), das JSON enthält.
+     * WICHTIG: Niemals `Html.fromHtml()` auf den gesamten JSON-String anwenden, da `Html.fromHtml`
+     * `<...>`-Tags löscht und JSON-Escapes (`\"`) zerstört!
+     */
+    private fun unescapeHtmlAttributeJson(rawAttr: String): String {
+        return rawAttr
+            .replace("&quot;", "\"")
+            .replace("&#039;", "'")
+            .replace("&#39;", "'")
+            .replace("&apos;", "'")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
+    }
+
+    private fun extractGamesListJsonFromHtml(html: String): String? {
+        val markerDouble = "data-profile-gameslist=\""
+        val idxDouble = html.indexOf(markerDouble)
+        if (idxDouble >= 0) {
+            val start = idxDouble + markerDouble.length
+            val end = html.indexOf('"', start)
+            if (end > start) {
+                return unescapeHtmlAttributeJson(html.substring(start, end))
+            }
+        }
+
+        val markerSingle = "data-profile-gameslist='"
+        val idxSingle = html.indexOf(markerSingle)
+        if (idxSingle >= 0) {
+            val start = idxSingle + markerSingle.length
+            val end = html.indexOf('\'', start)
+            if (end > start) {
+                return unescapeHtmlAttributeJson(html.substring(start, end))
+            }
+        }
+
+        if (html.contains("var rgGames =")) {
+            val startIdx = html.indexOf("var rgGames =")
+            val arrStart = html.indexOf('[', startIdx)
+            if (arrStart >= 0) {
+                val arrStr = extractBalancedJsonArray(html, arrStart)
+                if (!arrStr.isNullOrBlank()) {
+                    return """{"rgGames":$arrStr}"""
+                }
+            }
+        }
+        return null
+    }
+
+    private fun extractBalancedJsonArray(text: String, openBracketIndex: Int): String? {
+        if (openBracketIndex < 0 || openBracketIndex >= text.length || text[openBracketIndex] != '[') return null
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (i in openBracketIndex until text.length) {
+            val c = text[i]
+            if (escaped) {
+                escaped = false
+                continue
+            }
+            if (c == '\\') {
+                escaped = true
+                continue
+            }
+            if (c == '"') {
+                inString = !inString
+                continue
+            }
+            if (!inString) {
+                if (c == '[') depth++
+                else if (c == ']') {
+                    depth--
+                    if (depth == 0) {
+                        return text.substring(openBracketIndex, i + 1)
+                    }
+                }
+            }
+        }
+        return null
+    }
+
+    private fun extractRgGamesViaRegex(
+        rawJson: String,
+        knownTitles: Map<Long, String>
+    ): List<LocalGame> {
+        val result = LinkedHashMap<Long, LocalGame>()
+        val itemRegex = Regex(
+            """\"appid\"\s*:\s*(\d+)\s*,\s*\"name\"\s*:\s*\"((?:\\.|[^\"\\])*)\"(?:[^}]*?\"playtime_forever\"\s*:\s*(\d+))?"""
         )
+        for (match in itemRegex.findAll(rawJson)) {
+            val appId = match.groupValues[1].toLongOrNull() ?: continue
+            if (appId <= 0L) continue
+            val rawName = match.groupValues[2]
+                .replace("\\\"", "\"")
+                .replace("\\/", "/")
+                .replace("\\\\", "\\")
+            val cleanName = decodeUnicodeEscapes(rawName).trim().ifBlank {
+                knownTitles[appId] ?: "Steam App #$appId"
+            }
+            val playtimeMinutes = match.groupValues.getOrNull(3)?.toIntOrNull() ?: 0
+            val playtimeHours = playtimeMinutes / 60
+            result[appId] = LocalGame(
+                id = "steam_$appId",
+                title = cleanName,
+                coverImageUrl = AppConfig.getSteamHeaderImageUrl(appId),
+                isPlayed = playtimeMinutes > 30,
+                isOwned = true,
+                is100Percent = false,
+                personalRating = 0,
+                personalNote = if (playtimeHours > 0) "Steam Import ($playtimeHours Std. Spielzeit)" else "Steam Bibliothek Import",
+                isRecommended = false,
+                genres = "Steam Library",
+                playtimeHours = playtimeHours
+            )
+        }
+        return result.values.toList()
+    }
+
+    private fun decodeUnicodeEscapes(input: String): String {
+        if (!input.contains("\\u")) return input
+        return Regex("""\\u([0-9a-fA-F]{4})""").replace(input) { matchResult ->
+            val code = matchResult.groupValues[1].toInt(16)
+            code.toChar().toString()
+        }
+    }
+
+    private fun parseSteamCommunityXmlGamesList(
+        steamId64: String,
+        includeProfileSummaryFallback: Boolean = false
+    ): List<LocalGame> {
+        val urlsToTry = buildList {
+            // WICHTIG: Schrägstrich vor `?tab=all&xml=1`, damit Steam nicht auf die Standard-Ansicht umleitet!
+            add("https://steamcommunity.com/profiles/$steamId64/games/?tab=all&xml=1")
+            if (includeProfileSummaryFallback) {
+                add("https://steamcommunity.com/profiles/$steamId64/?xml=1")
+            }
+        }
         val xmlGames = mutableListOf<LocalGame>()
         val seenIds = mutableSetOf<Long>()
 
@@ -441,9 +781,13 @@ class ExternalGamesRepository {
     }
 
     /**
-     * Importiert die öffentliche Steam-Wunschliste (`isOwned = false`) über die Steam-ID des Nutzers.
+     * Importiert die KOMPLETTE öffentliche Steam-Wunschliste (`isOwned = false`) ohne künstliches Limit.
+     * Nutzt Known-Titles-Cache + Steam Bulk WishlistData + parallele AppDetails-Auflösung für Echtzeit-Geschwindigkeit.
      */
-    suspend fun importSteamWishlist(rawSteamIdInput: String): Result<List<LocalGame>> = withContext(Dispatchers.IO) {
+    suspend fun importSteamWishlist(
+        rawSteamIdInput: String,
+        knownTitles: Map<Long, String> = emptyMap()
+    ): Result<List<LocalGame>> = withContext(Dispatchers.IO) {
         val steamId64 = normalizeSteamId64(rawSteamIdInput)
         if (!steamId64.matches(Regex("^\\d{17}$"))) {
             return@withContext Result.failure(
@@ -459,32 +803,47 @@ class ExternalGamesRepository {
                 steamId = steamId64,
                 apiKey = steamKey
             )
+            // Alle Wishlist-Items sortiert nach Priorität (kein .take(40) Limit mehr!)
             val wishlistItems = envelope.response?.items.orEmpty()
+                .filter { it.appId > 0L }
                 .sortedBy { it.priority ?: Int.MAX_VALUE }
-                .take(40)
 
-            if (wishlistItems.isEmpty()) {
-                return@withContext Result.failure(
-                    IllegalStateException(
-                        "Die Steam-Wunschliste ist leer oder das Steam-Profil ist nicht öffentlich sichtbar."
-                    )
-                )
+            // Zusätzlich Bulk-Titel aus dem Steam Store Wishlistdata-Endpunkt vorladen
+            val bulkTitleMap = fetchBulkWishlistTitles(steamId64)
+
+            if (wishlistItems.isEmpty() && bulkTitleMap.isEmpty()) {
+                return@withContext Result.success(emptyList())
             }
 
-            val resolvedWishlist = wishlistItems.map { item ->
-                val resolvedTitle = resolveSteamAppTitle(item.appId) ?: "Steam App #${item.appId}"
-                LocalGame(
-                    id = "steam_${item.appId}",
-                    title = resolvedTitle,
-                    coverImageUrl = AppConfig.getSteamHeaderImageUrl(item.appId),
-                    isPlayed = false,
-                    isOwned = false,
-                    is100Percent = false,
-                    personalRating = 0,
-                    personalNote = "Importiert aus deiner Steam-Wunschliste",
-                    isRecommended = false,
-                    genres = "Steam Wishlist"
-                )
+            val appIdsOrdered = if (wishlistItems.isNotEmpty()) {
+                wishlistItems.map { it.appId }
+            } else {
+                bulkTitleMap.keys.toList()
+            }
+
+            val resolvedWishlist = coroutineScope {
+                appIdsOrdered.chunked(10).flatMap { chunk ->
+                    chunk.map { appId ->
+                        async {
+                            val title = knownTitles[appId]?.takeIf { !it.startsWith("Steam App #") }
+                                ?: bulkTitleMap[appId]?.takeIf { it.isNotBlank() }
+                                ?: resolveSteamAppTitle(appId)
+                                ?: "Steam App #$appId"
+                            LocalGame(
+                                id = "steam_$appId",
+                                title = title,
+                                coverImageUrl = AppConfig.getSteamHeaderImageUrl(appId),
+                                isPlayed = false,
+                                isOwned = false,
+                                is100Percent = false,
+                                personalRating = 0,
+                                personalNote = "Importiert aus deiner Steam-Wunschliste",
+                                isRecommended = false,
+                                genres = "Steam Wishlist"
+                            )
+                        }
+                    }.awaitAll()
+                }
             }
             Result.success(resolvedWishlist)
         } catch (e: Exception) {
@@ -492,17 +851,36 @@ class ExternalGamesRepository {
         }
     }
 
+    private fun fetchBulkWishlistTitles(steamId64: String): Map<Long, String> {
+        val map = LinkedHashMap<Long, String>()
+        try {
+            val body = httpGetString("https://store.steampowered.com/wishlist/profiles/$steamId64/wishlistdata/?p=0&l=german")
+                ?: return emptyMap()
+            if (body.trim().startsWith("{")) {
+                val json = JSONObject(body)
+                val keys = json.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    val appId = key.toLongOrNull() ?: continue
+                    val itemObj = json.optJSONObject(key) ?: continue
+                    val name = decodeHtmlEntities(itemObj.optString("name", "").trim())
+                    if (name.isNotBlank()) {
+                        map[appId] = name
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return map
+    }
+
     /**
-     * Lädt alle Errungenschaften (Achievements) für ein Spiel:
-     * - Unterscheidet zwischen bereits freigeschalteten (`isUnlocked = true`) und noch fehlenden (`isUnlocked = false`).
-     * - Markiert versteckte / story-relevante Errungenschaften (`isHiddenSpoiler = true`), damit sie wie bei Steam
-     *   standardmäßig ausgeblendet sind und erst durch Antippen sichtbar werden.
+     * Lädt alle Errungenschaften (Achievements) für ein Spiel inkl. Spoiler-Erkennung.
      */
     suspend fun fetchGameAchievements(
         game: LocalGame,
         rawSteamIdInput: String
     ): Result<List<SteamAchievement>> = withContext(Dispatchers.IO) {
-        // 1. Steam AppID bestimmen (aus "steam_12345" oder über den Spieletitel im Steam Store)
         val appId = resolveSteamAppIdForGame(game)
         if (appId == null || appId <= 0L) {
             val cached = SteamAchievementSerializer.fromJsonString(game.achievementsJson)
@@ -519,7 +897,6 @@ class ExternalGamesRepository {
 
         val steamKey = AppConfig.STEAM_API_KEY
 
-        // 2. Pfad A: Offizielle Steam Web API (`GetSchemaForGame` + `GetPlayerAchievements`), falls Key vorhanden
         if (steamKey.isNotBlank()) {
             try {
                 val schemaEnv = steamService.getSchemaForGame(
@@ -574,7 +951,6 @@ class ExternalGamesRepository {
             }
         }
 
-        // 3. Pfad B: Öffentlicher Steam Community XML Stats-Feed für den Spieler (ohne API-Key nutzbar!)
         if (steamId64 != null) {
             val playerXmlAchievements = parsePlayerSteamAchievementsXml(steamId64, appId)
             if (playerXmlAchievements.isNotEmpty()) {
@@ -582,13 +958,11 @@ class ExternalGamesRepository {
             }
         }
 
-        // 4. Pfad C: Öffentliche globale Steam-Errungenschaften für die AppID (falls das Spiel noch 0 Min. gespielt wurde)
         val globalHtmlAchievements = parseGlobalSteamAchievementsHtml(appId)
         if (globalHtmlAchievements.isNotEmpty()) {
             return@withContext Result.success(globalHtmlAchievements)
         }
 
-        // 5. Pfad D: Offline-Cache aus Room
         val cached = SteamAchievementSerializer.fromJsonString(game.achievementsJson)
         if (cached.isNotEmpty()) {
             return@withContext Result.success(cached)
@@ -596,7 +970,7 @@ class ExternalGamesRepository {
 
         Result.failure(
             IllegalStateException(
-                "Für '${game.title}' konnten aktuell keine Steam-Errungenschaften geladen werden (entweder hat das Spiel keine Steam-Achievements oder die Spieldetails sind privat)."
+                "Für '${game.title}' konnten aktuell keine Steam-Errungenschaften geladen werden."
             )
         )
     }
@@ -700,10 +1074,6 @@ class ExternalGamesRepository {
         return result
     }
 
-    /**
-     * Erkennt versteckte / Story-Spoiler-Errungenschaften anhand typischer Story-Marker oder leerer Beschreibungen,
-     * zusätzlich zum expliziten `hidden == 1` Flag der Steam Schema API.
-     */
     private fun isPotentialStorySpoiler(title: String, description: String): Boolean {
         if (description.isBlank()) return true
         val combined = "$title $description".lowercase(Locale.ROOT)
@@ -718,18 +1088,24 @@ class ExternalGamesRepository {
     }
 
     private fun decodeHtmlEntities(input: String): String {
-        return input
-            .replace("&quot;", "\"")
-            .replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&#39;", "'")
-            .replace("&apos;", "'")
+        if (input.isBlank()) return input
+        return try {
+            Html.fromHtml(input, Html.FROM_HTML_MODE_LEGACY).toString()
+        } catch (_: Exception) {
+            input
+                .replace("&quot;", "\"")
+                .replace("&#039;", "'")
+                .replace("&#39;", "'")
+                .replace("&apos;", "'")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&amp;", "&")
+        }
     }
 
     private fun resolveSteamAppTitle(appId: Long): String? {
         return try {
-            val body = httpGetString("${AppConfig.STEAM_STORE_BASE_URL}appdetails?appids=$appId&filters=basic")
+            val body = httpGetString("${AppConfig.STEAM_STORE_BASE_URL}appdetails?appids=$appId&filters=basic&l=german")
                 ?: return null
             val root = JSONObject(body)
             val appObj = root.optJSONObject(appId.toString())

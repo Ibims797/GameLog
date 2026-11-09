@@ -13,6 +13,8 @@ import com.example.data.remote.SteamAchievementSerializer
 import com.example.data.repository.StoryGamesRepository
 import com.google.firebase.firestore.FirebaseFirestoreException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -21,6 +23,7 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 sealed interface UiState<out T> {
@@ -41,23 +44,18 @@ data class SearchDialogState(
 data class SteamImportState(
     val isImportingLibrary: Boolean = false,
     val isImportingWishlist: Boolean = false,
+    val isLiveUpdaterActive: Boolean = true,
+    val lastLiveSyncTimeText: String = "Bereit",
     val statusMessage: String? = null,
     val isError: Boolean = false
 )
 
-/**
- * Zustand für die Steam-Errungenschaften (Achievements) in der Spiel-Detailansicht.
- */
 data class GameAchievementsState(
     val isLoading: Boolean = false,
     val achievements: List<SteamAchievement> = emptyList(),
     val errorMessage: String? = null
 )
 
-/**
- * Zustand für den geschützten Admin-API-Tresor (`/admin_vault/api_secrets`).
- * Strikt nur für den verifizierten Admin (`nico.schaefer.hn@gmail.com`) sichtbar und lesbar.
- */
 data class AdminVaultState(
     val isAdmin: Boolean = false,
     val isLoading: Boolean = false,
@@ -71,7 +69,6 @@ data class AdminVaultState(
 
 /**
  * Haupt-ViewModel für den Story Games Tracker & Community Hub (MVVM).
- * Gekapselt pro aktiver Session (`key = currentUserId`).
  */
 class StoryGamesViewModel(
     private val repository: StoryGamesRepository,
@@ -81,6 +78,9 @@ class StoryGamesViewModel(
 
     val isGoogleSignedIn: Boolean
         get() = repository.isGoogleSignedIn()
+
+    val isCurrentUserAdmin: Boolean
+        get() = repository.isCurrentUserAdmin()
 
     // 1. Lokale Room-Flows ("Meine Bibliothek" & "Wunschliste")
     val ownedLibraryGames: StateFlow<List<LocalGame>> = repository.ownedLibraryGames
@@ -97,7 +97,7 @@ class StoryGamesViewModel(
             initialValue = emptyList()
         )
 
-    // 2. Cloud Community Ranking Flow (`GlobalGameStats` mit 2-Tier Error-Handling)
+    // 2. Cloud Community Ranking Flow (`GlobalGameStats` - nur bewertete oder empfohlene Spiele!)
     val communityRankingsState: StateFlow<UiState<List<GlobalGameStats>>> = repository.communityRankings
         .map<List<GlobalGameStats>, UiState<List<GlobalGameStats>>> { UiState.Success(it) }
         .catch { error ->
@@ -129,7 +129,7 @@ class StoryGamesViewModel(
             initialValue = ""
         )
 
-    // 4. UI-Zustände für IGDB/Steam-Suche, Steam-Import, Admin-Vault, Detailansicht & Achievements
+    // 4. UI-Zustände
     private val _searchDialogState = MutableStateFlow(SearchDialogState())
     val searchDialogState: StateFlow<SearchDialogState> = _searchDialogState.asStateFlow()
 
@@ -150,36 +150,109 @@ class StoryGamesViewModel(
     private val _snackbarMessage = MutableStateFlow<String?>(null)
     val snackbarMessage: StateFlow<String?> = _snackbarMessage.asStateFlow()
 
+    private var liveUpdaterJob: Job? = null
+
+    private var lastAutoSyncedSteamId: String = ""
+
     init {
         viewModelScope.launch {
-            // Schritt 1: Falls Admin (`nico.schaefer.hn@gmail.com`) angemeldet ist, zuerst API-Keys in den RAM laden,
-            // damit der anschließende automatische Bibliotheks-Import sofort den Steam-API-Key nutzen kann!
             if (repository.isCurrentUserAdmin()) {
                 loadAdminVaultSecretsInternal()
             } else {
                 AppConfig.clearRuntimeAdminKeys()
             }
 
-            // Schritt 2: Cloud-Backup wiederherstellen (falls mit Google angemeldet)
             if (repository.isGoogleSignedIn()) {
                 repository.restoreUserCloudBackupIfNeeded()
             }
 
-            // Schritt 3: Automatischer Import von Steam-Bibliothek & Wunschliste, sobald eine Steam-ID verknüpft ist
-            val storedSteamId = themePreferences.linkedSteamIdFlow.first().trim()
+            val initialSteamId = themePreferences.linkedSteamIdFlow.first().trim()
                 .ifBlank {
                     if (currentUserId.startsWith("steam_")) {
                         currentUserId.removePrefix("steam_").trim()
                     } else ""
                 }
 
-            if (storedSteamId.isNotBlank() && repository.getOwnedLibraryGamesCount() == 0) {
-                syncSteamLibraryAndWishlistAutomatically(storedSteamId)
+            if (initialSteamId.isNotBlank()) {
+                lastAutoSyncedSteamId = initialSteamId
+                syncSteamLibraryAndWishlistAutomatically(initialSteamId)
+            }
+
+            // Reagiert sofort, wenn die Steam-ID kurz nach dem Login gesetzt oder geändert wird
+            launch {
+                themePreferences.linkedSteamIdFlow.collect { newSteamId ->
+                    val cleaned = newSteamId.trim()
+                    if (cleaned.isNotBlank() && cleaned != lastAutoSyncedSteamId) {
+                        lastAutoSyncedSteamId = cleaned
+                        syncSteamLibraryAndWishlistAutomatically(cleaned)
+                    }
+                }
+            }
+
+            // Startet den Live-Updater für Wunschliste & Bibliothek
+            startLiveWishlistAndLibraryUpdater()
+        }
+    }
+
+    /**
+     * Hintergrund-Live-Updater:
+     * Prüft alle 20 Sekunden automatisch die verknüpfte Steam-Wunschliste (und Bibliothek),
+     * sodass neu auf Steam hinzugefügte Wunschlisten-Spiele sofort live in der App erscheinen!
+     */
+    private fun startLiveWishlistAndLibraryUpdater() {
+        liveUpdaterJob?.cancel()
+        liveUpdaterJob = viewModelScope.launch {
+            while (isActive) {
+                delay(20_000L)
+                if (!_steamImportState.value.isLiveUpdaterActive) continue
+                val currentSteamId = linkedSteamId.value.trim().ifBlank {
+                    themePreferences.linkedSteamIdFlow.first().trim()
+                }
+                if (currentSteamId.isBlank()) continue
+                if (_steamImportState.value.isImportingLibrary || _steamImportState.value.isImportingWishlist) continue
+
+                val diffResult = repository.importSteamWishlistWithDiff(currentSteamId)
+                diffResult.onSuccess { summary ->
+                    _steamImportState.value = _steamImportState.value.copy(
+                        lastLiveSyncTimeText = "Live synchronisiert (${summary.totalCount} Titel)"
+                    )
+                    if (summary.newlyAddedTitles.isNotEmpty()) {
+                        val preview = summary.newlyAddedTitles.take(2).joinToString(", ")
+                        _snackbarMessage.value = "✨ Live-Update: '$preview' neu auf deiner Wunschliste erkannt!"
+                    }
+                }
             }
         }
     }
 
-    // --- ADMIN CLOUD VAULT (STRIKT EXKLUSIV FÜR nico.schaefer.hn@gmail.com) ---
+    fun toggleLiveWishlistUpdater(enabled: Boolean) {
+        _steamImportState.value = _steamImportState.value.copy(
+            isLiveUpdaterActive = enabled,
+            lastLiveSyncTimeText = if (enabled) "Live-Updater aktiv" else "Live-Updater pausiert"
+        )
+        if (enabled) {
+            triggerImmediateWishlistLiveSync()
+        }
+    }
+
+    fun triggerImmediateWishlistLiveSync() {
+        val currentSteamId = linkedSteamId.value.trim()
+        if (currentSteamId.isBlank() || _steamImportState.value.isImportingWishlist) return
+        viewModelScope.launch {
+            val diffResult = repository.importSteamWishlistWithDiff(currentSteamId)
+            diffResult.onSuccess { summary ->
+                _steamImportState.value = _steamImportState.value.copy(
+                    lastLiveSyncTimeText = "Live synchronisiert (${summary.totalCount} Titel)"
+                )
+                if (summary.newlyAddedTitles.isNotEmpty()) {
+                    val preview = summary.newlyAddedTitles.take(2).joinToString(", ")
+                    _snackbarMessage.value = "✨ Live-Update: '$preview' neu auf deiner Wunschliste erkannt!"
+                }
+            }
+        }
+    }
+
+    // --- ADMIN CLOUD VAULT & ADMIN RANKING MODERATION (STRIKT FÜR nico.schaefer.hn@gmail.com) ---
 
     fun loadAdminVaultSecrets() {
         if (!repository.isCurrentUserAdmin()) return
@@ -249,9 +322,8 @@ class StoryGamesViewModel(
                         statusMessage = "API-Keys im geschützten Cloud-Tresor gespeichert (nur für Admin lesbar)!",
                         isError = false
                     )
-                    // Falls bereits eine Steam-ID verknüpft ist, direkt Bibliothek mit dem neuen Key nachladen
                     val currentSteam = linkedSteamId.value.trim()
-                    if (currentSteam.isNotBlank() && repository.getOwnedLibraryGamesCount() == 0) {
+                    if (currentSteam.isNotBlank()) {
                         syncSteamLibraryAndWishlistAutomatically(currentSteam)
                     }
                 },
@@ -266,6 +338,28 @@ class StoryGamesViewModel(
         }
     }
 
+    /**
+     * Exklusive Admin-Funktion (`nico.schaefer.hn@gmail.com`):
+     * Löscht ein Spiel aus dem globalen Community-Ranking.
+     */
+    fun deleteRankingEntryAsAdmin(stats: GlobalGameStats) {
+        if (!repository.isCurrentUserAdmin()) {
+            _snackbarMessage.value = "Nur der Admin kann Einträge aus dem Ranking löschen."
+            return
+        }
+        viewModelScope.launch {
+            val result = repository.deleteGameFromCommunityRankingAsAdmin(stats.id)
+            result.fold(
+                onSuccess = {
+                    _snackbarMessage.value = "'${stats.title}' wurde aus dem Community-Ranking gelöscht."
+                },
+                onFailure = { err ->
+                    _snackbarMessage.value = "Fehler beim Löschen: ${err.localizedMessage ?: "Unbekannt"}"
+                }
+            )
+        }
+    }
+
     // --- SPIEL-DETAILANSICHT & ERRUNGENSCHAFTEN (ACHIEVEMENTS) ---
 
     fun selectGameForDetail(game: LocalGame?) {
@@ -275,7 +369,6 @@ class StoryGamesViewModel(
             return
         }
 
-        // Sofort lokal gecachte Errungenschaften anzeigen (funktioniert 100% offline!)
         val cached = SteamAchievementSerializer.fromJsonString(game.achievementsJson)
         _selectedGameAchievements.value = GameAchievementsState(
             isLoading = true,
@@ -283,7 +376,6 @@ class StoryGamesViewModel(
             errorMessage = null
         )
 
-        // Im Hintergrund aktuelle Errungenschaften von Steam abrufen & lokal cachen
         loadAchievementsForGame(game)
     }
 
@@ -307,7 +399,6 @@ class StoryGamesViewModel(
                         achievements = freshList,
                         errorMessage = null
                     )
-                    // Falls alle Errungenschaften freigeschaltet sind, auch Detail-State aktualisieren
                     if (freshList.isNotEmpty() && freshList.all { it.isUnlocked }) {
                         val currentDetail = _selectedGameForDetail.value
                         if (currentDetail?.id == game.id && !currentDetail.is100Percent) {
@@ -335,7 +426,7 @@ class StoryGamesViewModel(
         _snackbarMessage.value = null
     }
 
-    // --- DETAIL-ANSICHT SPEICHERN (BEWERTUNGEN NUR MIT GOOGLE, NOTIZEN & 100% AUCH OFFLINE) ---
+    // --- DETAIL-ANSICHT SPEICHERN (RANKING NUR BEI BEWERTUNG ODER EMPFEHLUNG!) ---
 
     fun saveGameDetailsAndSync(
         game: LocalGame,
@@ -347,8 +438,6 @@ class StoryGamesViewModel(
     ) {
         viewModelScope.launch {
             if (!repository.isGoogleSignedIn()) {
-                // Im Offline- / Nur-Steam-Modus: Notizen & lokaler Status werden gespeichert,
-                // aber Bewertungen (Sterne & Weiterempfehlung) sind exklusiv für Google-Anmeldung!
                 val localOnlyUpdated = game.copy(
                     personalNote = newNote.trim(),
                     is100Percent = newIs100Percent,
@@ -356,27 +445,37 @@ class StoryGamesViewModel(
                 )
                 repository.saveGameLocally(localOnlyUpdated)
                 _selectedGameForDetail.value = localOnlyUpdated
-                _snackbarMessage.value = "Notiz & Status lokal (offline) gespeichert. Für Bewertungen & Community-Sync bitte mit Google anmelden."
+                _snackbarMessage.value = "Notiz & Status lokal gespeichert. Bewertungen & Ranking erfordern Google-Login."
                 return@launch
             }
 
+            val sanitizedRating = newRating.coerceIn(0, 5)
             val updated = game.copy(
-                personalRating = newRating.coerceIn(0, 5),
+                personalRating = sanitizedRating,
                 personalNote = newNote.trim(),
                 isRecommended = newIsRecommended,
                 is100Percent = newIs100Percent,
-                isPlayed = newIsPlayed || newIs100Percent || newRating > 0
+                isPlayed = newIsPlayed || newIs100Percent || sanitizedRating > 0
             )
             _selectedGameForDetail.value = updated
             val syncResult = repository.saveGameAndSyncToCloud(updated)
             if (syncResult.isSuccess) {
-                _snackbarMessage.value = "Bewertung gespeichert & mit Community-Cloud synchronisiert!"
+                _snackbarMessage.value = if (sanitizedRating > 0 || newIsRecommended) {
+                    "Bewertung/Empfehlung gespeichert & ins Community-Ranking übertragen!"
+                } else {
+                    "Spielstatus gespeichert (Ohne Bewertung/Empfehlung nicht im Ranking gelistet)."
+                }
             } else {
-                _snackbarMessage.value = "Lokal gespeichert (Cloud-Sync Fehler: ${syncResult.exceptionOrNull()?.localizedMessage ?: "Offline"})"
+                _snackbarMessage.value = "Lokal gespeichert (${syncResult.exceptionOrNull()?.localizedMessage ?: "Offline"})"
             }
         }
     }
 
+    /**
+     * Schaltet den 100%-Platin-Run-Status für ein Spiel um.
+     * WICHTIG: Ein 100%-Run allein trägt das Spiel NICHT in das Community-Ranking ein,
+     * es sei denn, das Spiel besitzt bereits eine Bewertung (`personalRating > 0`) oder Empfehlung (`isRecommended`)!
+     */
     fun toggle100PercentQuick(game: LocalGame) {
         viewModelScope.launch {
             val toggled = !game.is100Percent
@@ -387,20 +486,15 @@ class StoryGamesViewModel(
             if (_selectedGameForDetail.value?.id == game.id) {
                 _selectedGameForDetail.value = updated
             }
-            if (repository.isGoogleSignedIn()) {
+            if (repository.isGoogleSignedIn() && (updated.personalRating > 0 || updated.isRecommended)) {
                 repository.saveGameAndSyncToCloud(updated)
-                _snackbarMessage.value = if (toggled) {
-                    "🏆 100% PLATIN RUN aktiviert & in die Cloud übertragen!"
-                } else {
-                    "100% Run Status zurückgesetzt."
-                }
             } else {
                 repository.saveGameLocally(updated)
-                _snackbarMessage.value = if (toggled) {
-                    "🏆 100% PLATIN RUN lokal (offline) aktiviert!"
-                } else {
-                    "100% Run Status lokal zurückgesetzt."
-                }
+            }
+            _snackbarMessage.value = if (toggled) {
+                "🏆 100% PLATIN RUN in deiner Bibliothek aktiviert!"
+            } else {
+                "100% Run Status zurückgesetzt."
             }
         }
     }
@@ -421,7 +515,7 @@ class StoryGamesViewModel(
             if (_selectedGameForDetail.value?.id == gameId) {
                 _selectedGameForDetail.value = null
             }
-            _snackbarMessage.value = "'$title' aus lokaler Datenbank entfernt."
+            _snackbarMessage.value = "'$title' aus deiner Sammlung entfernt."
         }
     }
 
@@ -490,7 +584,7 @@ class StoryGamesViewModel(
         }
     }
 
-    // --- STEAM LOGIN / ID VERKNÜPFUNG & AUTOMATISCHER IMPORT ---
+    // --- STEAM LOGIN / ID VERKNÜPFUNG & VOLLSTÄNDIGER AUTO-IMPORT ---
 
     fun saveSteamId(steamId: String) {
         val cleanId = steamId.trim()
@@ -507,42 +601,40 @@ class StoryGamesViewModel(
 
         viewModelScope.launch {
             themePreferences.setLinkedSteamId(targetId)
-            _steamImportState.value = SteamImportState(
+            _steamImportState.value = _steamImportState.value.copy(
                 isImportingLibrary = true,
                 isImportingWishlist = true,
-                statusMessage = "Synchronisiere Steam-Bibliothek & Wunschliste automatisch...",
+                statusMessage = "Lade komplette Steam-Bibliothek & Wunschliste...",
                 isError = false
             )
 
             val libResult = repository.importSteamLibrary(targetId)
-            val wishResult = repository.importSteamWishlist(targetId)
+            val wishResult = repository.importSteamWishlistWithDiff(targetId)
 
             val libCount = libResult.getOrDefault(0)
-            val wishCount = wishResult.getOrDefault(0)
+            val wishCount = wishResult.getOrNull()?.totalCount ?: 0
 
             if (libResult.isSuccess || wishResult.isSuccess) {
                 val msg = buildString {
-                    append("Steam-Sync abgeschlossen: ")
+                    append("Synchronisiert: ")
                     append("$libCount Spiele in Bibliothek")
-                    if (wishCount > 0) append(", $wishCount auf Wunschliste")
+                    if (wishCount > 0) append(" • $wishCount auf Wunschliste")
                     if (libResult.isFailure) {
-                        append(" (Hinweis Bibliothek: ${libResult.exceptionOrNull()?.localizedMessage ?: "Prüfe Steam-Privatsphäre"})")
+                        append(" (${libResult.exceptionOrNull()?.localizedMessage ?: "Bitte Steam-Privatsphäre prüfen"})")
                     }
                 }
-                _steamImportState.value = SteamImportState(
+                _steamImportState.value = _steamImportState.value.copy(
                     isImportingLibrary = false,
                     isImportingWishlist = false,
+                    lastLiveSyncTimeText = "Live synchronisiert ($wishCount Wunschliste)",
                     statusMessage = msg,
                     isError = libResult.isFailure && libCount == 0
                 )
-                if (libCount > 0) {
-                    _snackbarMessage.value = "$libCount Steam-Spiele automatisch in deine Bibliothek geladen!"
-                }
             } else {
                 val errMsg = libResult.exceptionOrNull()?.localizedMessage
                     ?: wishResult.exceptionOrNull()?.localizedMessage
                     ?: "Steam-Synchronisation fehlgeschlagen."
-                _steamImportState.value = SteamImportState(
+                _steamImportState.value = _steamImportState.value.copy(
                     isImportingLibrary = false,
                     isImportingWishlist = false,
                     statusMessage = errMsg,
@@ -555,7 +647,7 @@ class StoryGamesViewModel(
     fun importSteamOwnedGames(steamIdInput: String) {
         val targetId = steamIdInput.trim().ifBlank { linkedSteamId.value }
         if (targetId.isBlank()) {
-            _steamImportState.value = SteamImportState(
+            _steamImportState.value = _steamImportState.value.copy(
                 statusMessage = "Bitte gib zuerst deine 17-stellige SteamID64 oder deinen Steam-Profilnamen ein.",
                 isError = true
             )
@@ -564,23 +656,23 @@ class StoryGamesViewModel(
 
         viewModelScope.launch {
             themePreferences.setLinkedSteamId(targetId)
-            _steamImportState.value = SteamImportState(
+            _steamImportState.value = _steamImportState.value.copy(
                 isImportingLibrary = true,
-                statusMessage = "Importiere Owned Games aus Steam...",
+                statusMessage = "Importiere alle Owned Games aus deiner Steam-Bibliothek...",
                 isError = false
             )
             val result = repository.importSteamLibrary(targetId)
             result.fold(
                 onSuccess = { count ->
-                    _steamImportState.value = SteamImportState(
+                    _steamImportState.value = _steamImportState.value.copy(
                         isImportingLibrary = false,
-                        statusMessage = "$count Spiele erfolgreich in Meine Bibliothek importiert!",
+                        statusMessage = "Alle $count Spiele erfolgreich in Meine Bibliothek geladen!",
                         isError = false
                     )
                     _snackbarMessage.value = "$count Spiele in Meine Bibliothek geladen!"
                 },
                 onFailure = { error ->
-                    _steamImportState.value = SteamImportState(
+                    _steamImportState.value = _steamImportState.value.copy(
                         isImportingLibrary = false,
                         statusMessage = error.localizedMessage ?: "Steam-Bibliothek Import fehlgeschlagen.",
                         isError = true
@@ -593,7 +685,7 @@ class StoryGamesViewModel(
     fun importSteamWishlist(steamIdInput: String) {
         val targetId = steamIdInput.trim().ifBlank { linkedSteamId.value }
         if (targetId.isBlank()) {
-            _steamImportState.value = SteamImportState(
+            _steamImportState.value = _steamImportState.value.copy(
                 statusMessage = "Bitte gib zuerst deine 17-stellige SteamID64 oder deinen Steam-Profilnamen ein.",
                 isError = true
             )
@@ -602,22 +694,24 @@ class StoryGamesViewModel(
 
         viewModelScope.launch {
             themePreferences.setLinkedSteamId(targetId)
-            _steamImportState.value = SteamImportState(
+            _steamImportState.value = _steamImportState.value.copy(
                 isImportingWishlist = true,
-                statusMessage = "Importiere Steam-Wunschliste & löse Cover-Bilder auf...",
+                statusMessage = "Importiere komplette Steam-Wunschliste...",
                 isError = false
             )
-            val result = repository.importSteamWishlist(targetId)
+            val result = repository.importSteamWishlistWithDiff(targetId)
             result.fold(
-                onSuccess = { count ->
-                    _steamImportState.value = SteamImportState(
+                onSuccess = { summary ->
+                    _steamImportState.value = _steamImportState.value.copy(
                         isImportingWishlist = false,
-                        statusMessage = "$count Spiele aus deiner Steam-Wunschliste importiert!",
+                        lastLiveSyncTimeText = "Live synchronisiert (${summary.totalCount} Titel)",
+                        statusMessage = "${summary.totalCount} Spiele aus deiner Steam-Wunschliste geladen!",
                         isError = false
                     )
+                    _snackbarMessage.value = "${summary.totalCount} Spiele auf deiner Wunschliste aktualisiert!"
                 },
                 onFailure = { error ->
-                    _steamImportState.value = SteamImportState(
+                    _steamImportState.value = _steamImportState.value.copy(
                         isImportingWishlist = false,
                         statusMessage = error.localizedMessage ?: "Steam-Wunschliste Import fehlgeschlagen.",
                         isError = true

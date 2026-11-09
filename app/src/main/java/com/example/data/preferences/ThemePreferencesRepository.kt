@@ -15,10 +15,14 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(
 )
 
 /**
- * Die 3 wählbaren Designs laut Architektur-Vorgabe:
- * 1. "Cyberpunk Neon" (Gelb/Cyan/Magenta)
- * 2. "Dark Fantasy" (Dunkelgrau/Blutrot)
- * 3. "Sci-Fi Space" (Tiefblau/Weiß)
+ * Die 7 wählbaren Story-Gaming-Designs (gespeichert via DataStore Preferences):
+ * 1. "Cyberpunk Neon" (Gelb / Cyan / Magenta)
+ * 2. "Dark Fantasy" (Dunkelgrau / Blutrot / Runen-Gold)
+ * 3. "Sci-Fi Space" (Tiefblau / Sternenweiß / Eis-Cyan)
+ * 4. "Retro Synthwave" (Sunset-Pink / Outrun-Türkis / Violett)
+ * 5. "Nordic Valhalla" (Gletscher-Blau / Nordisches Bronze-Gold / Frost-Schiefer)
+ * 6. "Wasteland Pip-Tech" (Phosphor-Grün / Bernstein-Orange / Bunker-Anthrazit)
+ * 7. "Samurai Sakura" (Kirschblüten-Karmesin / Jade-Gold / Mitternachts-Indigo)
  */
 enum class AppThemeStyle(
     val id: String,
@@ -36,13 +40,37 @@ enum class AppThemeStyle(
         id = "dark_fantasy",
         displayName = "Dark Fantasy",
         subtitle = "Gotische Kathedrale & Runen-Glut (Dunkelgrau / Blutrot)",
-        palettePreviewText = "#C81D25 • #D4AF37 • #18181C"
+        palettePreviewText = "#D91E36 • #E5B84B • #18161E"
     ),
     SCI_FI_SPACE(
         id = "sci_fi_space",
         displayName = "Sci-Fi Space",
         subtitle = "Orbital-Kommandozentrale (Tiefblau / Sternenweiß / Eis-Cyan)",
-        palettePreviewText = "#EAF6FF • #38BDF8 • #070F2B"
+        palettePreviewText = "#38BDF8 • #F0F7FF • #0B1536"
+    ),
+    RETRO_SYNTHWAVE(
+        id = "retro_synthwave",
+        displayName = "Retro Synthwave",
+        subtitle = "80s Outrun & Neon-Horizont (Sunset-Pink / Türkis / Violett)",
+        palettePreviewText = "#FF2A85 • #00F5D4 • #160B28"
+    ),
+    NORDIC_VALHALLA(
+        id = "nordic_valhalla",
+        displayName = "Nordic Valhalla",
+        subtitle = "Midgard-Frost & Runen-Bronze (Gletscher-Blau / Gold / Schiefer)",
+        palettePreviewText = "#67E8F9 • #F59E0B • #0F1722"
+    ),
+    WASTELAND_PIPTECH(
+        id = "wasteland_piptech",
+        displayName = "Wasteland Pip-Tech",
+        subtitle = "Post-Apokalyptischer Terminal-Stil (Phosphor-Grün / Bernstein)",
+        palettePreviewText = "#22C55E • #F97316 • #0D140E"
+    ),
+    SAMURAI_SAKURA(
+        id = "samurai_sakura",
+        displayName = "Samurai Sakura",
+        subtitle = "Mitternachts-Indigo & Kirschblüte (Karmesin / Elfenbein-Gold)",
+        palettePreviewText = "#FB7185 • #FDE047 • #131124"
     );
 
     companion object {

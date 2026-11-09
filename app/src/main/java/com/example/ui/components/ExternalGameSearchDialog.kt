@@ -198,16 +198,17 @@ fun ExternalGameSearchDialog(
                                 ) {
                                     Box(
                                         modifier = Modifier
-                                            .size(width = 76.dp, height = 64.dp)
+                                            .size(width = 88.dp, height = 52.dp)
                                             .clip(RoundedCornerShape(10.dp))
-                                            .background(MaterialTheme.colorScheme.surface)
+                                            .background(MaterialTheme.colorScheme.surface),
+                                        contentAlignment = Alignment.Center
                                     ) {
                                         if (item.coverImageUrl.isNotBlank()) {
                                             AsyncImage(
                                                 model = item.coverImageUrl,
                                                 contentDescription = item.title,
                                                 modifier = Modifier.fillMaxSize(),
-                                                contentScale = ContentScale.Crop
+                                                contentScale = ContentScale.Fit
                                             )
                                         } else {
                                             Icon(

@@ -49,6 +49,13 @@ interface SteamApiService {
         @Query("format") format: String = "json"
     ): SteamOwnedGamesEnvelope
 
+    @GET("IPlayerService/GetOwnedGames/v1/")
+    suspend fun getOwnedGamesV1(
+        @Query("key") apiKey: String,
+        @Query("input_json") inputJson: String,
+        @Query("format") format: String = "json"
+    ): SteamOwnedGamesEnvelope
+
     @GET("IWishlistService/GetWishlist/v1/")
     suspend fun getWishlist(
         @Query("steamid") steamId: String,

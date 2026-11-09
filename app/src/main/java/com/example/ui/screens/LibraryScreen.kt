@@ -333,19 +333,26 @@ private fun StatMiniPill(
         shape = RoundedCornerShape(12.dp)
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
         ) {
             Text(
                 text = value,
                 style = MaterialTheme.typography.titleMedium,
                 color = tint,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
             )
             Text(
                 text = label,
                 style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
             )
         }
     }
@@ -397,9 +404,9 @@ private fun EmptyLibraryCard(
                 text = if (isFilterActive) {
                     "Wähle oben einen anderen Filter oder markiere ein Spiel mit dem 100%-Platin-Button."
                 } else if (linkedSteamId.isNotBlank()) {
-                    "Verknüpfte Steam-ID: $linkedSteamId • Tippe unten auf 'Steam-Bibliothek laden' oder suche einzelne Spiele über IGDB/Steam."
+                    "Verknüpfte Steam-ID: $linkedSteamId • Tippe unten auf 'Steam synchronisieren' oder suche einzelne Spiele über IGDB/Steam."
                 } else {
-                    "Suche nach Story-Spielen über die IGDB/Steam-API oder verknüpfe deine Steam-ID für den automatischen Bibliotheks-Import."
+                    "Suche nach Story-Spielen über die IGDB/Steam-API oder verknüpfe deine Steam-ID für den vollständigen Bibliotheks-Import."
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -426,7 +433,8 @@ private fun EmptyLibraryCard(
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Button(
                     onClick = onOpenSearch,
@@ -438,7 +446,10 @@ private fun EmptyLibraryCard(
                 ) {
                     Icon(imageVector = Icons.Default.Add, contentDescription = null)
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("IGDB / API Suche")
+                    Text(
+                        text = "IGDB / API Suche",
+                        textAlign = TextAlign.Center
+                    )
                 }
 
                 OutlinedButton(
@@ -452,7 +463,10 @@ private fun EmptyLibraryCard(
                 ) {
                     Icon(imageVector = Icons.Default.CloudDownload, contentDescription = null)
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text(if (linkedSteamId.isNotBlank()) "Steam synchronisieren" else "Steam Import")
+                    Text(
+                        text = if (linkedSteamId.isNotBlank()) "Steam Sync" else "Steam Import",
+                        textAlign = TextAlign.Center
+                    )
                 }
             }
         }

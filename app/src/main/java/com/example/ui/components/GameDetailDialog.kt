@@ -156,19 +156,34 @@ fun GameDetailDialog(
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
             ) {
-                // Header Cover-Bild
+                // Header Cover-Bild (Dynamisch eingepasst mit ContentScale.Fit, damit nichts abgeschnitten wird)
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(180.dp)
+                        .height(196.dp)
                         .background(MaterialTheme.colorScheme.surfaceVariant)
                 ) {
                     if (game.coverImageUrl.isNotBlank()) {
+                        // Dezenter Hintergrund-Schimmer
+                        AsyncImage(
+                            model = game.coverImageUrl,
+                            contentDescription = null,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .alpha(0.22f),
+                            contentScale = ContentScale.Crop
+                        )
+                        // Vollständiges, unbeschnittenes Cover-Bild zentriert im oberen Bereich
                         AsyncImage(
                             model = game.coverImageUrl,
                             contentDescription = game.title,
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(132.dp)
+                                .align(Alignment.TopCenter)
+                                .padding(horizontal = 48.dp, vertical = 10.dp)
+                                .clip(RoundedCornerShape(12.dp)),
+                            contentScale = ContentScale.Fit
                         )
                     }
                     Box(
@@ -177,7 +192,8 @@ fun GameDetailDialog(
                             .background(
                                 Brush.verticalGradient(
                                     colors = listOf(
-                                        Color.Black.copy(alpha = 0.25f),
+                                        Color.Transparent,
+                                        MaterialTheme.colorScheme.surface.copy(alpha = 0.82f),
                                         MaterialTheme.colorScheme.surface
                                     )
                                 )
@@ -201,12 +217,14 @@ fun GameDetailDialog(
                     Column(
                         modifier = Modifier
                             .align(Alignment.BottomStart)
-                            .padding(horizontal = 20.dp, vertical = 12.dp)
+                            .padding(horizontal = 20.dp, vertical = 10.dp)
                     ) {
                         Text(
                             text = game.title,
                             style = MaterialTheme.typography.headlineMedium,
-                            color = if (is100Percent) PlatinumGlowPrimary else MaterialTheme.colorScheme.onSurface
+                            color = if (is100Percent) PlatinumGlowPrimary else MaterialTheme.colorScheme.onSurface,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -798,7 +816,7 @@ private fun AchievementRowItem(
                             modifier = Modifier
                                 .fillMaxSize()
                                 .alpha(if (achievement.isUnlocked) 1f else 0.65f),
-                            contentScale = ContentScale.Crop
+                            contentScale = ContentScale.Fit
                         )
                     } else {
                         Icon(

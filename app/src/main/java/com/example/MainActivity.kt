@@ -8,6 +8,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.material.icons.Icons
@@ -42,6 +43,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.credentials.CredentialManager
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -72,11 +75,11 @@ import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.launch
 
 /**
- * Die 4 Haupt-Tabs der Bottom Navigation laut Spezifikation:
- * 1. "Meine Bibliothek"
+ * Die 4 Haupt-Tabs der Bottom Navigation mit perfekt unter den Icons zentrierten Titeln:
+ * 1. "Bibliothek"
  * 2. "Wunschliste"
- * 3. "Community Ranking"
- * 4. "Einstellungen"
+ * 3. "Ranking"
+ * 4. "Optionen"
  */
 enum class MainTab(
     val route: String,
@@ -87,7 +90,7 @@ enum class MainTab(
 ) {
     LIBRARY(
         route = "library",
-        label = "Meine Bibliothek",
+        label = "Bibliothek",
         selectedIcon = Icons.Filled.SportsEsports,
         unselectedIcon = Icons.Outlined.SportsEsports,
         testTag = "nav_tab_library"
@@ -101,14 +104,14 @@ enum class MainTab(
     ),
     COMMUNITY(
         route = "community",
-        label = "Community Ranking",
+        label = "Ranking",
         selectedIcon = Icons.Filled.EmojiEvents,
         unselectedIcon = Icons.Outlined.EmojiEvents,
         testTag = "nav_tab_community"
     ),
     SETTINGS(
         route = "settings",
-        label = "Einstellungen",
+        label = "Optionen",
         selectedIcon = Icons.Filled.Settings,
         unselectedIcon = Icons.Outlined.Settings,
         testTag = "nav_tab_settings"
@@ -280,7 +283,13 @@ fun AuthenticatedTrackerHub(
                     val selected = currentTab == tab
                     NavigationBarItem(
                         selected = selected,
-                        onClick = { currentTab = tab },
+                        onClick = {
+                            currentTab = tab
+                            if (tab == MainTab.WISHLIST) {
+                                viewModel.triggerImmediateWishlistLiveSync()
+                            }
+                        },
+                        alwaysShowLabel = true,
                         icon = {
                             Icon(
                                 imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
@@ -290,9 +299,12 @@ fun AuthenticatedTrackerHub(
                         label = {
                             Text(
                                 text = tab.label,
+                                modifier = Modifier.fillMaxWidth(),
+                                textAlign = TextAlign.Center,
                                 style = MaterialTheme.typography.labelMedium,
                                 fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                                maxLines = 1
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         },
                         modifier = Modifier.testTag(tab.testTag)
@@ -323,8 +335,12 @@ fun AuthenticatedTrackerHub(
                 MainTab.WISHLIST -> {
                     WishlistScreen(
                         wishlistGames = wishlistGames,
+                        linkedSteamId = linkedSteamId,
+                        steamImportState = steamImportState,
                         onOpenSearchForWishlist = { viewModel.openSearchDialog(targetOwnedLibrary = false) },
                         onNavigateToSteamWishlistImport = { currentTab = MainTab.SETTINGS },
+                        onToggleLiveUpdater = { viewModel.toggleLiveWishlistUpdater(it) },
+                        onTriggerLiveSyncNow = { viewModel.triggerImmediateWishlistLiveSync() },
                         onSelectGame = { viewModel.selectGameForDetail(it) },
                         onQuickToggle100Percent = { viewModel.toggle100PercentQuick(it) },
                         onMoveToOwnedLibrary = { viewModel.moveWishlistToOwnedLibrary(it) }
@@ -333,7 +349,9 @@ fun AuthenticatedTrackerHub(
 
                 MainTab.COMMUNITY -> {
                     CommunityRankingScreen(
-                        rankingsState = communityRankingsState
+                        rankingsState = communityRankingsState,
+                        isAdmin = viewModel.isCurrentUserAdmin,
+                        onDeleteRankingEntry = { viewModel.deleteRankingEntryAsAdmin(it) }
                     )
                 }
 

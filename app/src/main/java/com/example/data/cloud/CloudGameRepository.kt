@@ -23,13 +23,14 @@ import kotlin.math.roundToInt
 
 /**
  * Cloud-Repository für Firebase Firestore (`GlobalGameStats`, `UserGameContribution` & `AdminApiSecrets`).
- * Synchronisiert lokale Bewertungen, "Empfohlen"-Tags und 100%-Runs atomar in die globale Community-Tabelle
- * und verwaltet den geschützten Admin-API-Key-Tresor (`/admin_vault/api_secrets`).
+ * - Synchronisiert Bewertungen und Empfehlungen atomar in die globale Community-Tabelle.
+ * - Spiele ohne Bewertung (`ratingCount == 0`) und ohne Empfehlung (`recommendCount == 0`) werden
+ *   NICHT im Community-Ranking gelistet (bloßes Hinzufügen zur Bibliothek oder ein 100%-Run allein erzeugt keinen Ranking-Eintrag).
+ * - Bietet dem verifizierten Admin (`nico.schaefer.hn@gmail.com`) das Löschen einzelner Spiele aus dem Community-Ranking.
  */
 class CloudGameRepository(
     private val db: FirebaseFirestore
 ) {
-    // Convenience-Konstruktor: Verwendet zwingend R.string.firestore_database_id
     constructor(context: Context) : this(
         FirebaseFirestore.getInstance(
             context.applicationContext.getString(R.string.firestore_database_id)
@@ -45,7 +46,7 @@ class CloudGameRepository(
     }
 
     /**
-     * Prüft anhand des aktuell angemeldeten Google-Kontos, ob der Nutzer der verifizierte Admin ist.
+     * Prüft anhand des aktuell angemeldeten Google-Kontos, ob der Nutzer der verifizierte Admin (`nico.schaefer.hn@gmail.com`) ist.
      */
     fun isCurrentUserAdmin(): Boolean {
         val user = auth.currentUser ?: return false
@@ -58,7 +59,6 @@ class CloudGameRepository(
 
     /**
      * Lädt die geheimen API-Keys aus dem geschützten Cloud-Tresor (`/admin_vault/api_secrets`).
-     * Firestore Security Rules blockieren diesen Aufruf für jeden Nicht-Admin mit `PERMISSION_DENIED`.
      */
     suspend fun fetchAdminVaultSecrets(): Result<AdminApiSecrets?> {
         requireUserId()
@@ -92,7 +92,6 @@ class CloudGameRepository(
 
     /**
      * Speichert oder aktualisiert die API-Keys im geschützten Cloud-Tresor (`/admin_vault/api_secrets`).
-     * Nur der verifizierte Admin (`nico.schaefer.hn@gmail.com`) hat Schreibrechte in Firestore.
      */
     suspend fun saveAdminVaultSecrets(
         twitchClientId: String,
@@ -155,7 +154,9 @@ class CloudGameRepository(
 
     /**
      * Echtzeit-Beobachtung des globalen Community-Rankings (`GlobalGameStats`).
-     * Verwendet den mit `firestore.rules` abgestimmten Filter `whereEqualTo("isCommunityEntry", true)`.
+     * WICHTIG: Zeigt ausschließlich Spiele an, die mindestens eine echte Bewertung (`ratingCount > 0`)
+     * ODER mindestens eine Weiterempfehlung (`recommendCount > 0`) besitzen!
+     * Bloße Bibliotheks-Einträge oder reine 100%-Runs ohne Bewertung/Empfehlung erscheinen NICHT im Ranking.
      */
     fun observeCommunityRankings(): Flow<List<GlobalGameStats>> = flow {
         val uid = requireUserId()
@@ -168,11 +169,15 @@ class CloudGameRepository(
                     snapshot.toObjects(
                         GlobalGameStats::class.java,
                         DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
-                    ).sortedWith(
-                        compareByDescending<GlobalGameStats> { it.averageRating }
-                            .thenByDescending { it.recommendCount }
-                            .thenByDescending { it.total100PercentRuns }
                     )
+                        .filter { stat ->
+                            stat.ratingCount > 0L || stat.recommendCount > 0L || stat.averageRating > 0.0
+                        }
+                        .sortedWith(
+                            compareByDescending<GlobalGameStats> { it.averageRating }
+                                .thenByDescending { it.recommendCount }
+                                .thenByDescending { it.total100PercentRuns }
+                        )
                 }
                 .catch { error ->
                     val firestoreError = generateSequence(error) { it.cause }
@@ -186,6 +191,30 @@ class CloudGameRepository(
                     throw error
                 }
         )
+    }
+
+    /**
+     * Exklusive Admin-Funktion (`nico.schaefer.hn@gmail.com`):
+     * Löscht ein Spiel dauerhaft aus dem globalen Community-Ranking (`/global_game_stats/{gameId}`).
+     */
+    suspend fun deleteGameFromCommunityRanking(gameId: String): Result<Unit> {
+        requireUserId()
+        if (!isCurrentUserAdmin()) {
+            return Result.failure(
+                IllegalAccessException("Zugriff verweigert: Nur der Admin (${AppConfig.ADMIN_EMAIL}) kann Spiele aus dem Ranking löschen.")
+            )
+        }
+        val docId = sanitizeFirestoreId(gameId)
+        val docRef = db.collection(AppConfig.COLLECTION_GLOBAL_STATS).document(docId)
+        return try {
+            docRef.delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, docRef.path)
+            Result.failure(e)
+        }
     }
 
     /**
@@ -221,7 +250,7 @@ class CloudGameRepository(
     }
 
     /**
-     * Lädt alle bisherigen Cloud-Einträge des Nutzers einmalig (z.B. zum Wiederherstellen auf neuem Gerät).
+     * Lädt alle bisherigen Cloud-Einträge des Nutzers einmalig.
      */
     suspend fun fetchUserContributionsOnce(): Result<List<UserGameContribution>> {
         val uid = requireUserId()
@@ -248,9 +277,10 @@ class CloudGameRepository(
 
     /**
      * Synchronisiert ein lokales Spiel (`LocalGame`) mit der Cloud:
-     * 1. Speichert den persönlichen Stand unter `/users/{uid}/game_contributions/{gameId}`
-     * 2. Berechnet die Differenz zum vorherigen Stand dieses Nutzers und aktualisiert
-     *    `/global_game_stats/{gameId}` (averageRating, recommendCount, total100PercentRuns).
+     * 1. Speichert den persönlichen Stand unter `/users/{uid}/game_contributions/{gameId}`.
+     * 2. Aktualisiert `/global_game_stats/{gameId}` NUR DANN, wenn das Spiel bewertet (`personalRating > 0`)
+     *    oder empfohlen (`isRecommended == true`) wurde (oder eine frühere Bewertung/Empfehlung geändert wurde).
+     *    Bloßes Hinzufügen zur Bibliothek oder ein 100%-Run allein legt KEINEN Eintrag im Community-Ranking an!
      */
     suspend fun syncGameToCloud(game: LocalGame): Result<GlobalGameStats> {
         val uid = requireUserId()
@@ -264,7 +294,6 @@ class CloudGameRepository(
 
         return try {
             val existingUserSnap = userDocRef.get().await()
-            val existingGlobalSnap = globalDocRef.get().await()
 
             val oldRating = if (existingUserSnap.exists()) {
                 (existingUserSnap.getLong("personalRating") ?: 0L).toInt().coerceIn(0, 5)
@@ -280,11 +309,14 @@ class CloudGameRepository(
             val newRecommended = game.isRecommended
             val new100Percent = game.is100Percent
 
-            // 1. User Contribution speichern
+            val safeTitle = game.title.take(200).ifBlank { "Unbekanntes Spiel" }
+            val safeCover = game.coverImageUrl.take(1000)
+
+            // 1. Persönlichen Nutzer-Beitrag speichern
             if (existingUserSnap.exists()) {
                 val updateUserMap = mapOf(
-                    "title" to game.title.take(200).ifBlank { "Unbekanntes Spiel" },
-                    "coverImageUrl" to game.coverImageUrl.take(1000),
+                    "title" to safeTitle,
+                    "coverImageUrl" to safeCover,
                     "isPlayed" to game.isPlayed,
                     "isOwned" to game.isOwned,
                     "is100Percent" to new100Percent,
@@ -298,8 +330,8 @@ class CloudGameRepository(
                 val createUserMap = mapOf(
                     "userId" to uid,
                     "gameId" to docId,
-                    "title" to game.title.take(200).ifBlank { "Unbekanntes Spiel" },
-                    "coverImageUrl" to game.coverImageUrl.take(1000),
+                    "title" to safeTitle,
+                    "coverImageUrl" to safeCover,
                     "isPlayed" to game.isPlayed,
                     "isOwned" to game.isOwned,
                     "is100Percent" to new100Percent,
@@ -312,7 +344,40 @@ class CloudGameRepository(
                 userDocRef.set(createUserMap).await()
             }
 
-            // 2. GlobalGameStats berechnen & aktualisieren
+            // 2. Prüfen, ob das Spiel für das globale Community-Ranking relevant ist:
+            // Nur Spiele mit Bewertung (1-5 Sterne) oder Weiterempfehlung erscheinen im Community-Ranking!
+            val hasRatingOrRecommendationNow = newRating > 0 || newRecommended
+            val hadRatingOrRecommendationBefore = oldRating > 0 || oldRecommended
+
+            if (!hasRatingOrRecommendationNow && !hadRatingOrRecommendationBefore) {
+                return Result.success(
+                    GlobalGameStats(
+                        id = docId,
+                        title = safeTitle,
+                        coverImageUrl = safeCover,
+                        averageRating = 0.0,
+                        ratingSum = 0L,
+                        ratingCount = 0L,
+                        recommendCount = 0L,
+                        total100PercentRuns = 0L,
+                        isCommunityEntry = false,
+                        lastUpdatedBy = uid
+                    )
+                )
+            }
+
+            val existingGlobalSnap = globalDocRef.get().await()
+            if (!existingGlobalSnap.exists() && !hasRatingOrRecommendationNow) {
+                return Result.success(
+                    GlobalGameStats(
+                        id = docId,
+                        title = safeTitle,
+                        coverImageUrl = safeCover,
+                        averageRating = 0.0
+                    )
+                )
+            }
+
             val currentRatingSum = if (existingGlobalSnap.exists()) {
                 existingGlobalSnap.getLong("ratingSum") ?: 0L
             } else 0L
@@ -354,8 +419,6 @@ class CloudGameRepository(
                 0.0
             }
             val roundedAverage = ((rawAverage * 100.0).roundToInt() / 100.0).coerceIn(0.0, 5.0)
-            val safeTitle = game.title.take(200).ifBlank { "Unbekanntes Spiel" }
-            val safeCover = game.coverImageUrl.take(1000)
 
             if (existingGlobalSnap.exists()) {
                 val updateGlobalMap = mapOf(
@@ -410,7 +473,7 @@ class CloudGameRepository(
     }
 
     /**
-     * Liest einen fremden Nutzer-Beitrag per ID (wird u.a. in Security-Rule-Tests für Cross-User-Isolation geprüft).
+     * Liest einen fremden Nutzer-Beitrag per ID (wird in Security-Rule-Tests für Cross-User-Isolation geprüft).
      */
     suspend fun getUserContributionForUser(targetUserId: String, gameId: String): Result<UserGameContribution?> {
         val docId = sanitizeFirestoreId(gameId)

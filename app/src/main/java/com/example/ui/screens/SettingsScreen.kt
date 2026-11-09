@@ -58,6 +58,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.example.config.AppConfig
 import com.example.data.preferences.AppThemeStyle
@@ -67,10 +68,22 @@ import com.example.ui.theme.CyberMagenta
 import com.example.ui.theme.CyberYellow
 import com.example.ui.theme.FantasyBloodRed
 import com.example.ui.theme.FantasyRuneGold
+import com.example.ui.theme.NordicBronzeGold
+import com.example.ui.theme.NordicFrostSilver
+import com.example.ui.theme.NordicGlacierCyan
 import com.example.ui.theme.PlatinumGlowPrimary
+import com.example.ui.theme.SamuraiImperialGold
+import com.example.ui.theme.SamuraiJade
+import com.example.ui.theme.SamuraiSakuraRose
 import com.example.ui.theme.SpaceIceCyan
 import com.example.ui.theme.SpaceNebulaViolet
 import com.example.ui.theme.SpaceStarWhite
+import com.example.ui.theme.SynthPink
+import com.example.ui.theme.SynthSunsetOrange
+import com.example.ui.theme.SynthTurquoise
+import com.example.ui.theme.WastelandAmber
+import com.example.ui.theme.WastelandPipGreen
+import com.example.ui.theme.WastelandRust
 import com.example.ui.viewmodel.AdminVaultState
 import com.example.ui.viewmodel.SteamImportState
 import com.google.firebase.Firebase
@@ -79,8 +92,8 @@ import com.google.firebase.auth.auth
 /**
  * Tab 4: "Einstellungen"
  * Features:
- * 1. Dynamisches Theme-System (Speicherung über DataStore Preferences).
- * 2. Steam-Login (OpenID 2.0) & Steam-ID Import für Owned Games und Wishlist.
+ * 1. Dynamisches Theme-System mit 7 handgefertigten Designs (Speicherung über DataStore Preferences).
+ * 2. Steam-Login (OpenID 2.0) & Vollständiger Steam-ID Import für Owned Games und Live-Wishlist.
  * 3. Geschützter Cloud-Admin-Tresor (`/admin_vault/api_secrets`):
  *    - KEINE API-Keys im APK oder in `BuildConfig`!
  *    - Durch Firestore Security Rules (`isAdmin()`) ausschließlich für den verifizierten Admin
@@ -129,7 +142,7 @@ fun SettingsScreen(
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 36.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // 1. DYNAMISCHES THEME-SYSTEM (DATASTORE PREFERENCES)
+        // 1. DYNAMISCHES THEME-SYSTEM (7 DESIGNS IN DATASTORE PREFERENCES)
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -152,13 +165,13 @@ fun SettingsScreen(
                             tint = MaterialTheme.colorScheme.primary
                         )
                         Text(
-                            text = "DYNAMISCHES DESIGN-SYSTEM",
+                            text = "DYNAMISCHES DESIGN-SYSTEM (7 THEMES)",
                             style = MaterialTheme.typography.titleLarge,
                             color = MaterialTheme.colorScheme.primary
                         )
                     }
                     Text(
-                        text = "Wähle dein bevorzugtes UI-Theme. Deine Auswahl wird dauerhaft über Jetpack DataStore Preferences gespeichert.",
+                        text = "Wähle aus 7 handgefertigten Gaming-Designs. Deine Auswahl wird sofort angewendet und dauerhaft gespeichert.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -169,6 +182,10 @@ fun SettingsScreen(
                             AppThemeStyle.CYBERPUNK_NEON -> listOf(CyberYellow, CyberCyan, CyberMagenta)
                             AppThemeStyle.DARK_FANTASY -> listOf(FantasyBloodRed, FantasyRuneGold, Color(0xFF2B2635))
                             AppThemeStyle.SCI_FI_SPACE -> listOf(SpaceStarWhite, SpaceIceCyan, SpaceNebulaViolet)
+                            AppThemeStyle.RETRO_SYNTHWAVE -> listOf(SynthPink, SynthTurquoise, SynthSunsetOrange)
+                            AppThemeStyle.NORDIC_VALHALLA -> listOf(NordicGlacierCyan, NordicBronzeGold, NordicFrostSilver)
+                            AppThemeStyle.WASTELAND_PIPTECH -> listOf(WastelandPipGreen, WastelandAmber, WastelandRust)
+                            AppThemeStyle.SAMURAI_SAKURA -> listOf(SamuraiSakuraRose, SamuraiImperialGold, SamuraiJade)
                         }
 
                         Surface(
