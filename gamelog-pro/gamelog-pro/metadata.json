@@ -1,0 +1,6 @@
+{
+  "name": "Story Games",
+  "description": "Story Games Tracker & Community Hub with RAWG search, Steam import, 100% run tracking, and global cloud rankings.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

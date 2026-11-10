@@ -1,11 +1,15 @@
 package com.example.ui.components
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -20,14 +24,18 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.EmojiEvents
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Sell
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material.icons.filled.Visibility
@@ -63,8 +71,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -76,6 +86,8 @@ import com.example.ui.theme.PlatinumGlowAccent
 import com.example.ui.theme.PlatinumGlowPrimary
 import com.example.ui.theme.PlatinumGlowSecondary
 import com.example.ui.viewmodel.GameAchievementsState
+import com.example.ui.viewmodel.GamePriceState
+import java.util.Locale
 
 private enum class AchievementFilter {
     ALL,
@@ -85,31 +97,46 @@ private enum class AchievementFilter {
 
 /**
  * Detailansicht (Klick auf ein Spiel):
- * - Steam Errungenschaften (Achievements):
- *   Zeigt bereits erreichte (`isUnlocked == true`) und noch fehlende (`isUnlocked == false`) Errungenschaften.
- *   Versteckte / Spoiler-Errungenschaften sind wie bei Steam standardmäßig verborgen und werden erst durch
- *   Antippen ("Klicken zum Anzeigen") sichtbar gemacht!
- * - 5-Sterne-Rating & "Würdest du es weiterempfehlen?" Toggle:
+ * - **SteamDB & Live-Preise + Preisalarm Tracker**:
+ *   Zeigt den aktuellen Steam-Preis, Rabatt (`-XX%`), historischen Tiefstpreis, direkten Link zu SteamDB
+ *   (`https://steamdb.info/app/{appId}/`) und erlaubt das Setzen eines Preisalarms (inkl. 1-Tap auf den aktuellen Preis!).
+ * - **Steam Errungenschaften (Achievements)**:
+ *   Zeigt bereits erreichte (`isUnlocked == true`) und noch fehlende (`isUnlocked == false`) Errungenschaften
+ *   inkl. Spoiler-Schutz zum Antippen.
+ * - **5-Sterne-Rating & "Würdest du es weiterempfehlen?" Toggle**:
  *   Nur aktiv, wenn der Nutzer mit Google angemeldet ist (`isGoogleSignedIn == true`).
- * - 100% Platin-Run Status & persönliche Notizen:
+ * - **100% Platin-Run Status & persönliche Notizen**:
  *   Sowohl online (Cloud) als auch im Offline-/Steam-Modus verfügbar.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun GameDetailDialog(
     game: LocalGame,
     achievementsState: GameAchievementsState = GameAchievementsState(),
+    priceState: GamePriceState = GamePriceState(),
     isGoogleSignedIn: Boolean = true,
     onRefreshAchievements: () -> Unit = {},
+    onRefreshPrice: () -> Unit = {},
+    onSetPriceAlert: (Double) -> Unit = {},
     onRequestGoogleLogin: () -> Unit = {},
     onDismiss: () -> Unit,
     onSaveAndSync: (rating: Int, note: String, isRecommended: Boolean, is100Percent: Boolean, isPlayed: Boolean) -> Unit,
     onDelete: () -> Unit
 ) {
+    val context = LocalContext.current
     var rating by remember(game.id) { mutableIntStateOf(game.personalRating) }
     var note by remember(game.id) { mutableStateOf(game.personalNote) }
     var isRecommended by remember(game.id) { mutableStateOf(game.isRecommended) }
     var is100Percent by remember(game.id, game.is100Percent) { mutableStateOf(game.is100Percent) }
     var isPlayed by remember(game.id, game.isPlayed) { mutableStateOf(game.isPlayed) }
+
+    var customAlertInput by remember(game.id, game.targetPriceAlertEur) {
+        mutableStateOf(
+            if (game.targetPriceAlertEur > 0.0) {
+                String.format(Locale.US, "%.2f", game.targetPriceAlertEur)
+            } else ""
+        )
+    }
 
     var achievementFilter by remember(game.id) { mutableStateOf(AchievementFilter.ALL) }
     var revealedSpoilers by remember(game.id) { mutableStateOf(setOf<String>()) }
@@ -126,6 +153,17 @@ fun GameDetailDialog(
         }
     }
 
+    val effectivePriceInfo = priceState.priceInfo
+    val currentPriceCents = effectivePriceInfo?.currentPriceCents ?: game.currentPriceCents
+    val originalPriceCents = effectivePriceInfo?.originalPriceCents ?: game.originalPriceCents
+    val discountPercent = effectivePriceInfo?.discountPercent ?: game.discountPercent
+    val formattedPrice = effectivePriceInfo?.formattedPrice?.ifBlank { game.formattedPrice } ?: game.formattedPrice
+    val lowestHistPrice = effectivePriceInfo?.lowestHistoricalPrice?.ifBlank { game.lowestHistoricalPrice } ?: game.lowestHistoricalPrice
+    val appId = game.id.removePrefix("steam_").toLongOrNull() ?: effectivePriceInfo?.appId ?: 0L
+    val steamDbUrl = effectivePriceInfo?.steamDbUrl?.ifBlank {
+        if (appId > 0L) "https://steamdb.info/app/$appId/" else "https://steamdb.info/search/?a=app&q=${Uri.encode(game.title)}"
+    } ?: if (appId > 0L) "https://steamdb.info/app/$appId/" else "https://steamdb.info/search/?a=app&q=${Uri.encode(game.title)}"
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -133,7 +171,7 @@ fun GameDetailDialog(
         Surface(
             modifier = Modifier
                 .fillMaxWidth(0.95f)
-                .heightIn(max = 760.dp)
+                .heightIn(max = 780.dp)
                 .clip(RoundedCornerShape(24.dp))
                 .border(
                     width = if (is100Percent) 2.5.dp else 1.dp,
@@ -164,7 +202,6 @@ fun GameDetailDialog(
                         .background(MaterialTheme.colorScheme.surfaceVariant)
                 ) {
                     if (game.coverImageUrl.isNotBlank()) {
-                        // Dezenter Hintergrund-Schimmer
                         AsyncImage(
                             model = game.coverImageUrl,
                             contentDescription = null,
@@ -173,7 +210,6 @@ fun GameDetailDialog(
                                 .alpha(0.22f),
                             contentScale = ContentScale.Crop
                         )
-                        // Vollständiges, unbeschnittenes Cover-Bild zentriert im oberen Bereich
                         AsyncImage(
                             model = game.coverImageUrl,
                             contentDescription = game.title,
@@ -293,7 +329,316 @@ fun GameDetailDialog(
                         )
                     }
 
-                    // 2. STEAM ERRUNGENSCHAFTEN (ACHIEVEMENTS) MIT SPOILER-SCHUTZ
+                    // 2. STEAMDB & LIVE-PREISE + PREISALARM TRACKER
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.52f)
+                        ),
+                        shape = RoundedCornerShape(18.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(
+                                width = if (game.isPriceAlertTriggered) 1.8.dp else 1.dp,
+                                color = if (game.isPriceAlertTriggered) {
+                                    Color(0xFF4ADE80)
+                                } else {
+                                    MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+                                },
+                                shape = RoundedCornerShape(18.dp)
+                            )
+                            .testTag("steamdb_price_section_card")
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Sell,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                    Column {
+                                        Text(
+                                            text = "STEAMDB & PREISALARM TRACKER",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Text(
+                                            text = "Live Steam-Preis, Tiefstpreis & automatischer Preisalarm",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+
+                                IconButton(
+                                    onClick = onRefreshPrice,
+                                    enabled = !priceState.isLoading,
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    if (priceState.isLoading) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(18.dp),
+                                            strokeWidth = 2.dp,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    } else {
+                                        Icon(
+                                            imageVector = Icons.Default.Refresh,
+                                            contentDescription = "Preis aktualisieren",
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+
+                            // Aktueller Preis + Rabatt + Historischer Tiefstpreis
+                            Surface(
+                                color = MaterialTheme.colorScheme.surface,
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        Text(
+                                            text = "Aktueller Steam-Preis:",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Text(
+                                                text = formattedPrice.ifBlank {
+                                                    if (priceState.isLoading) "Lade Preis..." else "Preis auf SteamDB prüfen"
+                                                },
+                                                style = MaterialTheme.typography.titleLarge,
+                                                color = if (discountPercent > 0) Color(0xFF4ADE80) else MaterialTheme.colorScheme.onSurface,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            if (discountPercent > 0 && originalPriceCents > currentPriceCents) {
+                                                Text(
+                                                    text = String.format(Locale.GERMANY, "%.2f€", originalPriceCents / 100.0),
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    textDecoration = TextDecoration.LineThrough
+                                                )
+                                            }
+                                        }
+                                        if (lowestHistPrice.isNotBlank()) {
+                                            Text(
+                                                text = "Historischer Tiefstpreis: $lowestHistPrice",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = MaterialTheme.colorScheme.secondary
+                                            )
+                                        }
+                                    }
+
+                                    if (discountPercent > 0) {
+                                        Surface(
+                                            color = Color(0xFF4C6B22),
+                                            shape = RoundedCornerShape(10.dp)
+                                        ) {
+                                            Text(
+                                                text = "-$discountPercent%",
+                                                style = MaterialTheme.typography.titleMedium,
+                                                color = Color(0xFFBEEE11),
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Falls Preisalarm ausgelöst ist: Banner anzeigen
+                            if (game.targetPriceAlertEur > 0.0) {
+                                val targetStr = String.format(Locale.GERMANY, "%.2f€", game.targetPriceAlertEur)
+                                Surface(
+                                    color = if (game.isPriceAlertTriggered) {
+                                        Color(0xFF14532D).copy(alpha = 0.85f)
+                                    } else {
+                                        MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f)
+                                    },
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.NotificationsActive,
+                                            contentDescription = null,
+                                            tint = if (game.isPriceAlertTriggered) Color(0xFF4ADE80) else PlatinumGlowPrimary
+                                        )
+                                        Text(
+                                            text = if (game.isPriceAlertTriggered) {
+                                                "🔔 PREISALARM ERREICHT! Aktueller Preis (${formattedPrice.ifBlank { "aktuell" }}) liegt bei/unter deinem Alarm von $targetStr!"
+                                            } else {
+                                                "🔔 Aktiver Preisalarm bei ≤ $targetStr (wird im Hintergrund live geprüft)"
+                                            },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = if (game.isPriceAlertTriggered) Color.White else MaterialTheme.colorScheme.onSecondaryContainer,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
+                                }
+                            }
+
+                            // Schnell-Buttons für Preisalarm (inkl. "Auf aktuellen Preis setzen")
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                if (currentPriceCents > 0) {
+                                    val currentEur = currentPriceCents / 100.0
+                                    val currentEurText = String.format(Locale.GERMANY, "%.2f€", currentEur)
+                                    FilterChip(
+                                        selected = kotlin.math.abs(game.targetPriceAlertEur - currentEur) < 0.01,
+                                        onClick = {
+                                            customAlertInput = String.format(Locale.US, "%.2f", currentEur)
+                                            onSetPriceAlert(currentEur)
+                                        },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = Icons.Default.NotificationsActive,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        },
+                                        label = { Text("Alarm auf aktuellen Preis ($currentEurText)") }
+                                    )
+
+                                    val minus20Eur = ((currentPriceCents * 0.8).toInt()) / 100.0
+                                    if (minus20Eur >= 0.5) {
+                                        val minus20Text = String.format(Locale.GERMANY, "%.2f€", minus20Eur)
+                                        FilterChip(
+                                            selected = kotlin.math.abs(game.targetPriceAlertEur - minus20Eur) < 0.01,
+                                            onClick = {
+                                                customAlertInput = String.format(Locale.US, "%.2f", minus20Eur)
+                                                onSetPriceAlert(minus20Eur)
+                                            },
+                                            label = { Text("-20% Alarm ($minus20Text)") }
+                                        )
+                                    }
+                                }
+
+                                if (game.targetPriceAlertEur > 0.0) {
+                                    FilterChip(
+                                        selected = false,
+                                        onClick = {
+                                            customAlertInput = ""
+                                            onSetPriceAlert(0.0)
+                                        },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = Icons.Default.NotificationsOff,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        },
+                                        label = { Text("Alarm aus") }
+                                    )
+                                }
+                            }
+
+                            // Eigener Wunschpreis-Input + Speichern Button
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = customAlertInput,
+                                    onValueChange = { customAlertInput = it },
+                                    label = { Text("Preisalarm in € (z.B. 14.99)") },
+                                    singleLine = true,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("price_alert_input"),
+                                    shape = RoundedCornerShape(12.dp)
+                                )
+                                Button(
+                                    onClick = {
+                                        val parsed = customAlertInput.trim()
+                                            .replace("€", "")
+                                            .replace(",", ".")
+                                            .toDoubleOrNull()
+                                        if (parsed != null && parsed > 0.0) {
+                                            onSetPriceAlert(parsed)
+                                        } else if (currentPriceCents > 0) {
+                                            val fallbackEur = currentPriceCents / 100.0
+                                            customAlertInput = String.format(Locale.US, "%.2f", fallbackEur)
+                                            onSetPriceAlert(fallbackEur)
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .height(52.dp)
+                                        .testTag("set_price_alert_button"),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.NotificationsActive,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Alarm setzen")
+                                }
+                            }
+
+                            // Direkt-Button zu SteamDB
+                            OutlinedButton(
+                                onClick = {
+                                    try {
+                                        context.startActivity(
+                                            Intent(Intent.ACTION_VIEW, Uri.parse(steamDbUrl))
+                                        )
+                                    } catch (_: Exception) {}
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("open_steamdb_button"),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Preisverlauf & Charts auf SteamDB.info öffnen")
+                            }
+                        }
+                    }
+
+                    // 3. STEAM ERRUNGENSCHAFTEN (ACHIEVEMENTS) MIT SPOILER-SCHUTZ
                     Card(
                         colors = CardDefaults.cardColors(
                             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
@@ -480,7 +825,7 @@ fun GameDetailDialog(
                         }
                     }
 
-                    // 3. Gespielt-Status FilterChip
+                    // 4. Gespielt-Status FilterChip
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -507,7 +852,7 @@ fun GameDetailDialog(
                         )
                     }
 
-                    // 4. CLOUD-BEWERTUNG & EMPFEHLUNG (NUR MIT GOOGLE-ANMELDUNG AKTIV!)
+                    // 5. CLOUD-BEWERTUNG & EMPFEHLUNG (NUR MIT GOOGLE-ANMELDUNG AKTIV!)
                     if (!isGoogleSignedIn) {
                         Card(
                             colors = CardDefaults.cardColors(
@@ -537,7 +882,7 @@ fun GameDetailDialog(
                                     )
                                 }
                                 Text(
-                                    text = "Du nutzt aktuell den Steam-/Offline-Modus. Deine Bibliothek, Errungenschaften, 100%-Runs und Notizen funktionieren komplett lokal. Um Sterne-Bewertungen und Empfehlungen für das globale Community-Ranking abzugeben, melde dich bitte mit Google an.",
+                                    text = "Du nutzt aktuell den Steam-/Offline-Modus. Deine Bibliothek, Errungenschaften, SteamDB-Preisalarme, 100%-Runs und Notizen funktionieren komplett lokal. Um Sterne-Bewertungen und Empfehlungen für das globale Community-Ranking abzugeben, melde dich bitte mit Google an.",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSecondaryContainer
                                 )
@@ -552,7 +897,7 @@ fun GameDetailDialog(
                         }
                     }
 
-                    // 5. Interaktives 5-Sterne-Rating (Gesperrt falls nicht mit Google angemeldet)
+                    // 6. Interaktives 5-Sterne-Rating (Gesperrt falls nicht mit Google angemeldet)
                     Card(
                         colors = CardDefaults.cardColors(
                             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
@@ -615,7 +960,7 @@ fun GameDetailDialog(
                         }
                     }
 
-                    // 6. Toggle für "Würdest du es weiterempfehlen?" (Gesperrt falls nicht mit Google angemeldet)
+                    // 7. Toggle für "Würdest du es weiterempfehlen?" (Gesperrt falls nicht mit Google angemeldet)
                     Card(
                         colors = CardDefaults.cardColors(
                             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
@@ -676,7 +1021,7 @@ fun GameDetailDialog(
                         }
                     }
 
-                    // 7. Textfeld für persönliche Notizen (funktioniert online & offline!)
+                    // 8. Textfeld für persönliche Notizen (funktioniert online & offline!)
                     OutlinedTextField(
                         value = note,
                         onValueChange = { note = it },
@@ -690,7 +1035,7 @@ fun GameDetailDialog(
                         maxLines = 5
                     )
 
-                    // 8. Speichern + Löschen Buttons
+                    // 9. Speichern + Löschen Buttons
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -737,13 +1082,6 @@ fun GameDetailDialog(
     }
 }
 
-/**
- * Einzelne Errungenschafts-Zeile mit echtem Steam-Spoiler-Schutz:
- * - Freigeschaltete Erfolge (`isUnlocked == true`) werden farbig mit Häkchen angezeigt.
- * - Noch fehlende Erfolge (`isUnlocked == false`), die als Spoiler eingestuft sind (`isProtectedSpoiler == true`),
- *   verbergen ihren Titel, ihr Icon und ihre Beschreibung hinter einer klickbaren Spoiler-Abdeckung.
- * - Erst durch Antippen (`onToggleRevealSpoiler`) wird der Spoiler aufgedeckt!
- */
 @Composable
 private fun AchievementRowItem(
     achievement: SteamAchievement,
@@ -788,7 +1126,6 @@ private fun AchievementRowItem(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Achievement Icon oder Spoiler-Schloss
             Box(
                 modifier = Modifier
                     .size(46.dp)
@@ -828,7 +1165,6 @@ private fun AchievementRowItem(
                 }
             }
 
-            // Titel & Beschreibung (oder Spoiler-Schutz-Hinweis)
             Column(modifier = Modifier.weight(1f)) {
                 if (isCurrentlyHidden) {
                     Text(
@@ -874,7 +1210,6 @@ private fun AchievementRowItem(
                 }
             }
 
-            // Rechts: Status-Badge ("✓ Erreicht" vs. "Offen" / Spoiler-Auge)
             if (achievement.isUnlocked) {
                 Surface(
                     color = PlatinumGlowPrimary.copy(alpha = 0.18f),

@@ -10,6 +10,9 @@ import com.example.data.preferences.ThemePreferencesRepository
 import com.example.data.remote.ExternalGameSearchResult
 import com.example.data.remote.SteamAchievement
 import com.example.data.remote.SteamAchievementSerializer
+import com.example.data.remote.SteamInventoryGameContext
+import com.example.data.remote.SteamInventoryItem
+import com.example.data.remote.SteamPriceOverviewInfo
 import com.example.data.repository.StoryGamesRepository
 import com.google.firebase.firestore.FirebaseFirestoreException
 import kotlinx.coroutines.CancellationException
@@ -47,12 +50,32 @@ data class SteamImportState(
     val isLiveUpdaterActive: Boolean = true,
     val lastLiveSyncTimeText: String = "Bereit",
     val statusMessage: String? = null,
-    val isError: Boolean = false
+    val isError: Boolean = false,
+    val onlyPublicShowcaseWarning: Boolean = false,
+    val hasSteamWebSession: Boolean = false
 )
 
 data class GameAchievementsState(
     val isLoading: Boolean = false,
     val achievements: List<SteamAchievement> = emptyList(),
+    val errorMessage: String? = null
+)
+
+data class GamePriceState(
+    val isLoading: Boolean = false,
+    val priceInfo: SteamPriceOverviewInfo? = null,
+    val errorMessage: String? = null
+)
+
+data class SteamInventoryUiState(
+    val selectedContext: SteamInventoryGameContext = SteamInventoryGameContext.STEAM_COMMUNITY,
+    val customAppIdInput: String = "",
+    val customContextIdInput: String = "2",
+    val searchQuery: String = "",
+    val isLoading: Boolean = false,
+    val items: List<SteamInventoryItem> = emptyList(),
+    val itemPrices: Map<String, String> = emptyMap(),
+    val loadingPriceKeys: Set<String> = emptySet(),
     val errorMessage: String? = null
 )
 
@@ -133,7 +156,9 @@ class StoryGamesViewModel(
     private val _searchDialogState = MutableStateFlow(SearchDialogState())
     val searchDialogState: StateFlow<SearchDialogState> = _searchDialogState.asStateFlow()
 
-    private val _steamImportState = MutableStateFlow(SteamImportState())
+    private val _steamImportState = MutableStateFlow(
+        SteamImportState(hasSteamWebSession = repository.hasActiveSteamWebSession())
+    )
     val steamImportState: StateFlow<SteamImportState> = _steamImportState.asStateFlow()
 
     private val _adminVaultState = MutableStateFlow(
@@ -146,6 +171,12 @@ class StoryGamesViewModel(
 
     private val _selectedGameAchievements = MutableStateFlow(GameAchievementsState())
     val selectedGameAchievements: StateFlow<GameAchievementsState> = _selectedGameAchievements.asStateFlow()
+
+    private val _selectedGamePriceState = MutableStateFlow(GamePriceState())
+    val selectedGamePriceState: StateFlow<GamePriceState> = _selectedGamePriceState.asStateFlow()
+
+    private val _inventoryState = MutableStateFlow(SteamInventoryUiState())
+    val inventoryState: StateFlow<SteamInventoryUiState> = _inventoryState.asStateFlow()
 
     private val _snackbarMessage = MutableStateFlow<String?>(null)
     val snackbarMessage: StateFlow<String?> = _snackbarMessage.asStateFlow()
@@ -189,15 +220,15 @@ class StoryGamesViewModel(
                 }
             }
 
-            // Startet den Live-Updater für Wunschliste & Bibliothek
+            // Startet den Live-Updater für Wunschliste, Bibliothek & Preisalarme
             startLiveWishlistAndLibraryUpdater()
         }
     }
 
     /**
      * Hintergrund-Live-Updater:
-     * Prüft alle 20 Sekunden automatisch die verknüpfte Steam-Wunschliste (und Bibliothek),
-     * sodass neu auf Steam hinzugefügte Wunschlisten-Spiele sofort live in der App erscheinen!
+     * Prüft alle 20 Sekunden automatisch die verknüpfte Steam-Wunschliste & Preise,
+     * sodass neu auf Steam hinzugefügte Wunschlisten-Spiele und erreichte Preisalarme sofort live erscheinen!
      */
     private fun startLiveWishlistAndLibraryUpdater() {
         liveUpdaterJob?.cancel()
@@ -214,9 +245,13 @@ class StoryGamesViewModel(
                 val diffResult = repository.importSteamWishlistWithDiff(currentSteamId)
                 diffResult.onSuccess { summary ->
                     _steamImportState.value = _steamImportState.value.copy(
-                        lastLiveSyncTimeText = "Live synchronisiert (${summary.totalCount} Titel)"
+                        lastLiveSyncTimeText = "Live synchronisiert (${summary.totalCount} Titel)",
+                        hasSteamWebSession = repository.hasActiveSteamWebSession()
                     )
-                    if (summary.newlyAddedTitles.isNotEmpty()) {
+                    if (summary.triggeredAlertTitles.isNotEmpty()) {
+                        val preview = summary.triggeredAlertTitles.take(2).joinToString(", ")
+                        _snackbarMessage.value = "🔔 PREISALARM ERREICHT: $preview!"
+                    } else if (summary.newlyAddedTitles.isNotEmpty()) {
                         val preview = summary.newlyAddedTitles.take(2).joinToString(", ")
                         _snackbarMessage.value = "✨ Live-Update: '$preview' neu auf deiner Wunschliste erkannt!"
                     }
@@ -242,9 +277,13 @@ class StoryGamesViewModel(
             val diffResult = repository.importSteamWishlistWithDiff(currentSteamId)
             diffResult.onSuccess { summary ->
                 _steamImportState.value = _steamImportState.value.copy(
-                    lastLiveSyncTimeText = "Live synchronisiert (${summary.totalCount} Titel)"
+                    lastLiveSyncTimeText = "Live synchronisiert (${summary.totalCount} Titel)",
+                    hasSteamWebSession = repository.hasActiveSteamWebSession()
                 )
-                if (summary.newlyAddedTitles.isNotEmpty()) {
+                if (summary.triggeredAlertTitles.isNotEmpty()) {
+                    val preview = summary.triggeredAlertTitles.take(2).joinToString(", ")
+                    _snackbarMessage.value = "🔔 PREISALARM ERREICHT: $preview!"
+                } else if (summary.newlyAddedTitles.isNotEmpty()) {
                     val preview = summary.newlyAddedTitles.take(2).joinToString(", ")
                     _snackbarMessage.value = "✨ Live-Update: '$preview' neu auf deiner Wunschliste erkannt!"
                 }
@@ -360,12 +399,13 @@ class StoryGamesViewModel(
         }
     }
 
-    // --- SPIEL-DETAILANSICHT & ERRUNGENSCHAFTEN (ACHIEVEMENTS) ---
+    // --- SPIEL-DETAILANSICHT, ERRUNGENSCHAFTEN & STEAMDB PREISALARM ---
 
     fun selectGameForDetail(game: LocalGame?) {
         _selectedGameForDetail.value = game
         if (game == null) {
             _selectedGameAchievements.value = GameAchievementsState()
+            _selectedGamePriceState.value = GamePriceState()
             return
         }
 
@@ -377,6 +417,99 @@ class StoryGamesViewModel(
         )
 
         loadAchievementsForGame(game)
+        loadPriceForGame(game)
+    }
+
+    fun loadPriceForGame(game: LocalGame) {
+        viewModelScope.launch {
+            val appId = game.id.removePrefix("steam_").toLongOrNull() ?: 0L
+            val initialInfo = if (game.currentPriceCents >= 0 || game.formattedPrice.isNotBlank()) {
+                SteamPriceOverviewInfo(
+                    steamAppId = appId,
+                    currentPriceCents = game.currentPriceCents,
+                    originalPriceCents = game.originalPriceCents,
+                    discountPercent = game.discountPercent,
+                    formattedCurrentPrice = game.formattedPrice,
+                    lowestHistoricalPrice = game.lowestHistoricalPrice,
+                    steamDbUrl = if (appId > 0L) "https://steamdb.info/app/$appId/" else "https://steamdb.info/search/?a=app&q=${game.title}"
+                )
+            } else null
+
+            _selectedGamePriceState.value = GamePriceState(
+                isLoading = true,
+                priceInfo = initialInfo,
+                errorMessage = null
+            )
+
+            val result = repository.refreshGamePriceAndAlert(game)
+            result.fold(
+                onSuccess = { (updatedGame, freshPriceInfo) ->
+                    _selectedGamePriceState.value = GamePriceState(
+                        isLoading = false,
+                        priceInfo = freshPriceInfo,
+                        errorMessage = null
+                    )
+                    if (_selectedGameForDetail.value?.id == updatedGame.id) {
+                        _selectedGameForDetail.value = updatedGame
+                    }
+                    if (updatedGame.isPriceAlertTriggered && !game.isPriceAlertTriggered) {
+                        _snackbarMessage.value = "🔔 Preisalarm erreicht für '${updatedGame.title}' (${updatedGame.formattedPrice})!"
+                    }
+                },
+                onFailure = { err ->
+                    _selectedGamePriceState.value = GamePriceState(
+                        isLoading = false,
+                        priceInfo = initialInfo,
+                        errorMessage = err.localizedMessage ?: "SteamDB/Store Preis konnte nicht geladen werden."
+                    )
+                }
+            )
+        }
+    }
+
+    /**
+     * Setzt oder deaktiviert (`0.0`) den Preisalarm für ein Spiel (z.B. auf den aktuellen Preis oder Wunschpreis).
+     */
+    fun savePriceAlertForGame(game: LocalGame, targetAlertEur: Double) {
+        viewModelScope.launch {
+            val updated = repository.updatePriceAlertTarget(game, targetAlertEur)
+            if (_selectedGameForDetail.value?.id == updated.id) {
+                _selectedGameForDetail.value = updated
+            }
+            if (targetAlertEur <= 0.0) {
+                _snackbarMessage.value = "Preisalarm für '${updated.title}' deaktiviert."
+            } else if (updated.isPriceAlertTriggered) {
+                _snackbarMessage.value = "🔔 Preisalarm aktiv & bereits erreicht! Aktueller Preis (${updated.formattedPrice}) liegt bei/unter ${String.format(java.util.Locale.GERMANY, "%.2f€", targetAlertEur)}!"
+            } else {
+                _snackbarMessage.value = "🔔 Preisalarm für '${updated.title}' auf ${String.format(java.util.Locale.GERMANY, "%.2f€", targetAlertEur)} gesetzt!"
+            }
+            // Aktualisiere zusätzlich live den Preis aus dem Store
+            repository.refreshGamePriceAndAlert(updated, newTargetAlertEur = targetAlertEur).onSuccess { (refreshed, info) ->
+                _selectedGamePriceState.value = GamePriceState(isLoading = false, priceInfo = info)
+                if (_selectedGameForDetail.value?.id == refreshed.id) {
+                    _selectedGameForDetail.value = refreshed
+                }
+            }
+        }
+    }
+
+    fun refreshAllPricesAndAlerts() {
+        viewModelScope.launch {
+            _snackbarMessage.value = "Prüfe Live-Preise & Preisalarme auf Steam..."
+            val result = repository.refreshAllPricesAndCheckAlerts()
+            result.fold(
+                onSuccess = { triggered ->
+                    if (triggered.isNotEmpty()) {
+                        _snackbarMessage.value = "🔔 Preisalarm erreicht bei: ${triggered.take(3).joinToString(", ")}!"
+                    } else {
+                        _snackbarMessage.value = "Alle Steam-Preise & Preisalarme wurden aktualisiert!"
+                    }
+                },
+                onFailure = { err ->
+                    _snackbarMessage.value = "Preis-Update Fehler: ${err.localizedMessage ?: "Unbekannt"}"
+                }
+            )
+        }
     }
 
     fun loadAchievementsForGame(game: LocalGame) {
@@ -418,6 +551,95 @@ class StoryGamesViewModel(
                         } else null
                     )
                 }
+            )
+        }
+    }
+
+    // --- STEAM INVENTAR VIEWER ---
+
+    fun selectInventoryContext(context: SteamInventoryGameContext) {
+        _inventoryState.value = _inventoryState.value.copy(
+            selectedContext = context,
+            errorMessage = null
+        )
+        loadSteamInventory(context = context)
+    }
+
+    fun updateCustomInventoryInput(appIdInput: String, contextIdInput: String) {
+        _inventoryState.value = _inventoryState.value.copy(
+            customAppIdInput = appIdInput,
+            customContextIdInput = contextIdInput
+        )
+    }
+
+    fun updateInventorySearchQuery(query: String) {
+        _inventoryState.value = _inventoryState.value.copy(searchQuery = query)
+    }
+
+    fun loadSteamInventory(
+        context: SteamInventoryGameContext = _inventoryState.value.selectedContext,
+        customAppId: Long? = null,
+        customContextId: Long? = null
+    ) {
+        viewModelScope.launch {
+            val steamId = linkedSteamId.value.trim().ifBlank {
+                themePreferences.linkedSteamIdFlow.first().trim()
+            }
+            if (steamId.isBlank()) {
+                _inventoryState.value = _inventoryState.value.copy(
+                    isLoading = false,
+                    errorMessage = "Bitte verknüpfe zuerst deine Steam-ID oder melde dich per Steam Web-Login an."
+                )
+                return@launch
+            }
+
+            val targetAppId = customAppId ?: context.appId
+            val targetContextId = customContextId ?: context.contextId
+
+            _inventoryState.value = _inventoryState.value.copy(
+                isLoading = true,
+                errorMessage = null
+            )
+
+            val result = repository.fetchSteamInventory(
+                steamIdInput = steamId,
+                appId = targetAppId,
+                contextId = targetContextId
+            )
+
+            result.fold(
+                onSuccess = { items ->
+                    _inventoryState.value = _inventoryState.value.copy(
+                        isLoading = false,
+                        items = items,
+                        errorMessage = null
+                    )
+                },
+                onFailure = { err ->
+                    _inventoryState.value = _inventoryState.value.copy(
+                        isLoading = false,
+                        items = emptyList(),
+                        errorMessage = err.localizedMessage ?: "Steam-Inventar konnte nicht geladen werden."
+                    )
+                }
+            )
+        }
+    }
+
+    fun loadMarketPriceForInventoryItem(item: SteamInventoryItem) {
+        if (item.marketHashName.isBlank()) return
+        val key = "${item.appId}_${item.classId}"
+        if (key in _inventoryState.value.loadingPriceKeys) return
+
+        viewModelScope.launch {
+            _inventoryState.value = _inventoryState.value.copy(
+                loadingPriceKeys = _inventoryState.value.loadingPriceKeys + key
+            )
+            val result = repository.fetchSteamMarketItemPrice(item.appId, item.marketHashName)
+            val priceText = result.getOrElse { "Kein Marktpreis" }
+            _inventoryState.value = _inventoryState.value.copy(
+                itemPrices = _inventoryState.value.itemPrices + (key to priceText),
+                loadingPriceKeys = _inventoryState.value.loadingPriceKeys - key
             )
         }
     }
@@ -595,6 +817,20 @@ class StoryGamesViewModel(
         }
     }
 
+    fun onSteamWebSessionAuthenticated(steamId64: String) {
+        val cleanId = steamId64.trim()
+        if (cleanId.isBlank()) return
+        viewModelScope.launch {
+            themePreferences.setLinkedSteamId(cleanId)
+            _steamImportState.value = _steamImportState.value.copy(
+                hasSteamWebSession = repository.hasActiveSteamWebSession(),
+                onlyPublicShowcaseWarning = false
+            )
+            syncSteamLibraryAndWishlistAutomatically(cleanId)
+            loadSteamInventory()
+        }
+    }
+
     fun syncSteamLibraryAndWishlistAutomatically(steamIdInput: String = linkedSteamId.value) {
         val targetId = steamIdInput.trim().ifBlank { linkedSteamId.value.trim() }
         if (targetId.isBlank()) return
@@ -605,21 +841,26 @@ class StoryGamesViewModel(
                 isImportingLibrary = true,
                 isImportingWishlist = true,
                 statusMessage = "Lade komplette Steam-Bibliothek & Wunschliste...",
-                isError = false
+                isError = false,
+                hasSteamWebSession = repository.hasActiveSteamWebSession()
             )
 
-            val libResult = repository.importSteamLibrary(targetId)
+            val libResult = repository.importSteamLibraryWithReport(targetId)
             val wishResult = repository.importSteamWishlistWithDiff(targetId)
 
-            val libCount = libResult.getOrDefault(0)
+            val report = libResult.getOrNull()
+            val libCount = report?.games?.size ?: 0
             val wishCount = wishResult.getOrNull()?.totalCount ?: 0
+            val showcaseOnly = report?.onlyPublicShowcaseFound == true
 
             if (libResult.isSuccess || wishResult.isSuccess) {
                 val msg = buildString {
                     append("Synchronisiert: ")
                     append("$libCount Spiele in Bibliothek")
                     if (wishCount > 0) append(" • $wishCount auf Wunschliste")
-                    if (libResult.isFailure) {
+                    if (showcaseOnly) {
+                        append(" • ⚠️ Hinweis: Steam verbirgt aktuell deine restlichen Spiele (Nur $libCount öffentliche Profil-Showcase-Spiele sichtbar). Tippe auf 'Steam Web-Login' oder stelle 'Spieldetails' auf Öffentlich!")
+                    } else if (libResult.isFailure) {
                         append(" (${libResult.exceptionOrNull()?.localizedMessage ?: "Bitte Steam-Privatsphäre prüfen"})")
                     }
                 }
@@ -628,7 +869,9 @@ class StoryGamesViewModel(
                     isImportingWishlist = false,
                     lastLiveSyncTimeText = "Live synchronisiert ($wishCount Wunschliste)",
                     statusMessage = msg,
-                    isError = libResult.isFailure && libCount == 0
+                    isError = libResult.isFailure && libCount == 0,
+                    onlyPublicShowcaseWarning = showcaseOnly,
+                    hasSteamWebSession = repository.hasActiveSteamWebSession()
                 )
             } else {
                 val errMsg = libResult.exceptionOrNull()?.localizedMessage
@@ -638,7 +881,8 @@ class StoryGamesViewModel(
                     isImportingLibrary = false,
                     isImportingWishlist = false,
                     statusMessage = errMsg,
-                    isError = true
+                    isError = true,
+                    hasSteamWebSession = repository.hasActiveSteamWebSession()
                 )
             }
         }
@@ -659,23 +903,37 @@ class StoryGamesViewModel(
             _steamImportState.value = _steamImportState.value.copy(
                 isImportingLibrary = true,
                 statusMessage = "Importiere alle Owned Games aus deiner Steam-Bibliothek...",
-                isError = false
+                isError = false,
+                hasSteamWebSession = repository.hasActiveSteamWebSession()
             )
-            val result = repository.importSteamLibrary(targetId)
+            val result = repository.importSteamLibraryWithReport(targetId)
             result.fold(
-                onSuccess = { count ->
+                onSuccess = { report ->
+                    val count = report.games.size
+                    val warningText = if (report.onlyPublicShowcaseFound) {
+                        "⚠️ Nur $count Profil-Showcase-Spiele gefunden! Deine restlichen 200+ Spiele sind auf Steam unter 'Privatsphäre -> Spieldetails' versteckt. Nutze den 'Steam Web-Login' Button oben, um alle 250+ Spiele direkt freizuschalten!"
+                    } else {
+                        "Alle $count Spiele erfolgreich in Meine Bibliothek geladen!"
+                    }
                     _steamImportState.value = _steamImportState.value.copy(
                         isImportingLibrary = false,
-                        statusMessage = "Alle $count Spiele erfolgreich in Meine Bibliothek geladen!",
-                        isError = false
+                        statusMessage = warningText,
+                        isError = false,
+                        onlyPublicShowcaseWarning = report.onlyPublicShowcaseFound,
+                        hasSteamWebSession = repository.hasActiveSteamWebSession()
                     )
-                    _snackbarMessage.value = "$count Spiele in Meine Bibliothek geladen!"
+                    _snackbarMessage.value = if (report.onlyPublicShowcaseFound) {
+                        "Nur $count Showcase-Spiele öffentlich sichtbar – nutze Steam Web-Login für alle 250+ Spiele!"
+                    } else {
+                        "$count Spiele in Meine Bibliothek geladen!"
+                    }
                 },
                 onFailure = { error ->
                     _steamImportState.value = _steamImportState.value.copy(
                         isImportingLibrary = false,
                         statusMessage = error.localizedMessage ?: "Steam-Bibliothek Import fehlgeschlagen.",
-                        isError = true
+                        isError = true,
+                        hasSteamWebSession = repository.hasActiveSteamWebSession()
                     )
                 }
             )
@@ -696,7 +954,7 @@ class StoryGamesViewModel(
             themePreferences.setLinkedSteamId(targetId)
             _steamImportState.value = _steamImportState.value.copy(
                 isImportingWishlist = true,
-                statusMessage = "Importiere komplette Steam-Wunschliste...",
+                statusMessage = "Importiere komplette Steam-Wunschliste & Preise...",
                 isError = false
             )
             val result = repository.importSteamWishlistWithDiff(targetId)
@@ -708,7 +966,11 @@ class StoryGamesViewModel(
                         statusMessage = "${summary.totalCount} Spiele aus deiner Steam-Wunschliste geladen!",
                         isError = false
                     )
-                    _snackbarMessage.value = "${summary.totalCount} Spiele auf deiner Wunschliste aktualisiert!"
+                    if (summary.triggeredAlertTitles.isNotEmpty()) {
+                        _snackbarMessage.value = "🔔 Preisalarm erreicht: ${summary.triggeredAlertTitles.take(2).joinToString(", ")}!"
+                    } else {
+                        _snackbarMessage.value = "${summary.totalCount} Spiele auf deiner Wunschliste aktualisiert!"
+                    }
                 },
                 onFailure = { error ->
                     _steamImportState.value = _steamImportState.value.copy(

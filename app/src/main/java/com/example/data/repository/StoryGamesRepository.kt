@@ -10,17 +10,21 @@ import com.example.data.remote.ExternalGameSearchResult
 import com.example.data.remote.ExternalGamesRepository
 import com.example.data.remote.SteamAchievement
 import com.example.data.remote.SteamAchievementSerializer
+import com.example.data.remote.SteamInventoryItem
+import com.example.data.remote.SteamLibraryImportReport
+import com.example.data.remote.SteamPriceOverviewInfo
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import kotlinx.coroutines.flow.Flow
 
 data class LiveWishlistSyncSummary(
     val totalCount: Int,
-    val newlyAddedTitles: List<String>
+    val newlyAddedTitles: List<String>,
+    val triggeredAlertTitles: List<String> = emptyList()
 )
 
 /**
- * Zentrales Hybrid-Repository (Room lokal + Firebase Cloud-Sync + IGDB/Steam Retrofit + Cloud Admin Vault).
+ * Zentrales Hybrid-Repository (Room lokal + Firebase Cloud-Sync + IGDB/Steam/SteamDB Retrofit + Cloud Admin Vault).
  */
 class StoryGamesRepository(
     private val gameDao: GameDao,
@@ -43,6 +47,12 @@ class StoryGamesRepository(
      * Prüft strikt, ob das aktuell angemeldete Google-Konto der verifizierte Admin (`nico.schaefer.hn@gmail.com`) ist.
      */
     fun isCurrentUserAdmin(): Boolean = cloudRepository.isCurrentUserAdmin()
+
+    /**
+     * Prüft, ob eine aktive Steam-WebView-Session (`steamLoginSecure`) vorhanden ist,
+     * mit der auch geschützte/Freunde-Bibliotheken (250+ Spiele) geladen werden können.
+     */
+    fun hasActiveSteamWebSession(): Boolean = externalRepository.hasActiveSteamWebSession()
 
     suspend fun getOwnedLibraryGamesCount(): Int {
         return gameDao.getAllGamesSnapshot().count { it.isOwned }
@@ -138,7 +148,7 @@ class StoryGamesRepository(
         toOwnedLibrary: Boolean
     ): LocalGame {
         val existing = gameDao.getGameById(result.apiId)
-        val newGame = if (existing != null) {
+        val baseGame = if (existing != null) {
             existing.copy(
                 isOwned = toOwnedLibrary,
                 updatedAtEpoch = System.currentTimeMillis()
@@ -158,8 +168,18 @@ class StoryGamesRepository(
                 genres = result.genres
             )
         }
-        gameDao.upsertGame(newGame)
-        return newGame
+
+        val appId = baseGame.id.removePrefix("steam_").toLongOrNull()
+        val withPrice = if (appId != null && baseGame.currentPriceCents < 0) {
+            val priceMap = externalRepository.fetchBulkSteamPrices(listOf(appId))
+            val info = priceMap[appId]
+            if (info != null) {
+                applyPriceInfoToGame(baseGame, info)
+            } else baseGame
+        } else baseGame
+
+        gameDao.upsertGame(withPrice)
+        return withPrice
     }
 
     /**
@@ -195,20 +215,49 @@ class StoryGamesRepository(
             .toMap()
     }
 
+    private fun applyPriceInfoToGame(
+        game: LocalGame,
+        info: SteamPriceOverviewInfo,
+        overrideTargetAlertEur: Double? = null
+    ): LocalGame {
+        val targetAlert = overrideTargetAlertEur ?: game.targetPriceAlertEur
+        val currentPriceEur = if (info.currentPriceCents >= 0) info.currentPriceCents / 100.0 else -1.0
+        val alertTriggered = targetAlert > 0.0 && currentPriceEur >= 0.0 && currentPriceEur <= targetAlert + 0.001
+        return game.copy(
+            currentPriceCents = info.currentPriceCents,
+            originalPriceCents = info.originalPriceCents,
+            discountPercent = info.discountPercent,
+            formattedPrice = info.formattedPrice.ifBlank { game.formattedPrice },
+            lowestHistoricalPrice = info.lowestHistoricalPrice.ifBlank { game.lowestHistoricalPrice },
+            targetPriceAlertEur = targetAlert,
+            isPriceAlertTriggered = alertTriggered,
+            updatedAtEpoch = System.currentTimeMillis()
+        )
+    }
+
     /**
      * Importiert ALLE Spiele aus der Steam-Spielebibliothek (Owned Games) und speichert sie in Room.
+     * Gibt einen detaillierten `SteamLibraryImportReport` zurück (inkl. Hinweis, falls ohne Steam-Web-Session
+     * nur die ~6 Showcase-Spiele sichtbar waren).
      */
-    suspend fun importSteamLibrary(steamIdInput: String): Result<Int> {
+    suspend fun importSteamLibraryWithReport(steamIdInput: String): Result<SteamLibraryImportReport> {
         if (isCurrentUserAdmin() && AppConfig.STEAM_API_KEY.isBlank()) {
             loadAdminVaultSecrets()
         }
         val knownTitles = buildKnownSteamTitlesMap()
-        val result = externalRepository.importSteamOwnedGames(steamIdInput, knownTitles)
-        return result.map { importedList ->
+        val result = externalRepository.importSteamOwnedGamesWithReport(steamIdInput, knownTitles)
+        return result.map { report ->
             val existingMap = gameDao.getAllGamesSnapshot().associateBy { it.id }
-            val merged = importedList.map { imported ->
+            val merged = report.games.map { imported ->
                 val prev = existingMap[imported.id]
                 if (prev != null) {
+                    val mergedPriceCents = if (imported.currentPriceCents >= 0) imported.currentPriceCents else prev.currentPriceCents
+                    val mergedOriginalCents = if (imported.originalPriceCents >= 0) imported.originalPriceCents else prev.originalPriceCents
+                    val mergedDiscount = if (imported.currentPriceCents >= 0) imported.discountPercent else prev.discountPercent
+                    val mergedFormatted = imported.formattedPrice.ifBlank { prev.formattedPrice }
+                    val targetAlert = prev.targetPriceAlertEur
+                    val triggered = targetAlert > 0.0 && mergedPriceCents >= 0 && (mergedPriceCents / 100.0) <= targetAlert + 0.001
+
                     prev.copy(
                         title = if (imported.title.startsWith("Steam App #") && !prev.title.startsWith("Steam App #")) {
                             prev.title
@@ -218,6 +267,13 @@ class StoryGamesRepository(
                         isOwned = true,
                         playtimeHours = maxOf(prev.playtimeHours, imported.playtimeHours),
                         isPlayed = prev.isPlayed || imported.isPlayed,
+                        currentPriceCents = mergedPriceCents,
+                        originalPriceCents = mergedOriginalCents,
+                        discountPercent = mergedDiscount,
+                        formattedPrice = mergedFormatted,
+                        lowestHistoricalPrice = imported.lowestHistoricalPrice.ifBlank { prev.lowestHistoricalPrice },
+                        targetPriceAlertEur = targetAlert,
+                        isPriceAlertTriggered = triggered,
                         updatedAtEpoch = System.currentTimeMillis()
                     )
                 } else {
@@ -225,13 +281,17 @@ class StoryGamesRepository(
                 }
             }
             gameDao.upsertGames(merged)
-            merged.size
+            report.copy(games = merged)
         }
     }
 
+    suspend fun importSteamLibrary(steamIdInput: String): Result<Int> {
+        return importSteamLibraryWithReport(steamIdInput).map { it.games.size }
+    }
+
     /**
-     * Importiert ALLE Spiele aus der Steam-Wunschliste (`isOwned = false`) und gibt zurück,
-     * welche neuen Spiele im Vergleich zum bisherigen lokalen Stand hinzugekommen sind (für den Live-Updater).
+     * Importiert ALLE Spiele aus der Steam-Wunschliste (`isOwned = false`), aktualisiert deren Live-Preise
+     * und prüft automatisch alle aktiven Preisalarme (`targetPriceAlertEur`).
      */
     suspend fun importSteamWishlistWithDiff(steamIdInput: String): Result<LiveWishlistSyncSummary> {
         if (isCurrentUserAdmin() && AppConfig.STEAM_API_KEY.isBlank()) {
@@ -244,7 +304,24 @@ class StoryGamesRepository(
         val result = externalRepository.importSteamWishlist(steamIdInput, knownTitles)
         return result.map { importedList ->
             val newlyAddedTitles = mutableListOf<String>()
-            val newWishlistGames = importedList.mapNotNull { imported ->
+            val triggeredAlertTitles = mutableListOf<String>()
+
+            // Falls einige Wunschlisten-Spiele noch keinen Preis haben, laden wir sie gebündelt nach
+            val missingPriceAppIds = importedList.mapNotNull { game ->
+                val appId = game.id.removePrefix("steam_").toLongOrNull() ?: return@mapNotNull null
+                if (game.currentPriceCents < 0) appId else null
+            }
+            val bulkPrices = if (missingPriceAppIds.isNotEmpty()) {
+                externalRepository.fetchBulkSteamPrices(missingPriceAppIds)
+            } else emptyMap()
+
+            val newWishlistGames = importedList.mapNotNull { rawImported ->
+                val appId = rawImported.id.removePrefix("steam_").toLongOrNull()
+                val bulkInfo = if (appId != null) bulkPrices[appId] else null
+                val imported = if (bulkInfo != null && rawImported.currentPriceCents < 0) {
+                    applyPriceInfoToGame(rawImported, bulkInfo)
+                } else rawImported
+
                 val prev = existingMap[imported.id]
                 when {
                     prev == null -> {
@@ -252,9 +329,30 @@ class StoryGamesRepository(
                         imported
                     }
                     !prev.isOwned -> {
+                        val mergedPriceCents = if (imported.currentPriceCents >= 0) imported.currentPriceCents else prev.currentPriceCents
+                        val mergedOriginalCents = if (imported.originalPriceCents >= 0) imported.originalPriceCents else prev.originalPriceCents
+                        val mergedDiscount = if (imported.currentPriceCents >= 0) imported.discountPercent else prev.discountPercent
+                        val mergedFormatted = imported.formattedPrice.ifBlank { prev.formattedPrice }
+                        val targetAlert = prev.targetPriceAlertEur
+                        val isTriggeredNow = targetAlert > 0.0 && mergedPriceCents >= 0 &&
+                            (mergedPriceCents / 100.0) <= targetAlert + 0.001
+
+                        if (isTriggeredNow && !prev.isPriceAlertTriggered) {
+                            triggeredAlertTitles.add(
+                                "${imported.title} (${mergedFormatted.ifBlank { String.format(java.util.Locale.GERMANY, "%.2f€", mergedPriceCents / 100.0) }})"
+                            )
+                        }
+
                         prev.copy(
                             title = if (!imported.title.startsWith("Steam App #")) imported.title else prev.title,
                             coverImageUrl = imported.coverImageUrl.ifBlank { prev.coverImageUrl },
+                            currentPriceCents = mergedPriceCents,
+                            originalPriceCents = mergedOriginalCents,
+                            discountPercent = mergedDiscount,
+                            formattedPrice = mergedFormatted,
+                            lowestHistoricalPrice = imported.lowestHistoricalPrice.ifBlank { prev.lowestHistoricalPrice },
+                            targetPriceAlertEur = targetAlert,
+                            isPriceAlertTriggered = isTriggeredNow,
                             updatedAtEpoch = System.currentTimeMillis()
                         )
                     }
@@ -266,13 +364,109 @@ class StoryGamesRepository(
             }
             LiveWishlistSyncSummary(
                 totalCount = newWishlistGames.size,
-                newlyAddedTitles = newlyAddedTitles
+                newlyAddedTitles = newlyAddedTitles,
+                triggeredAlertTitles = triggeredAlertTitles
             )
         }
     }
 
     suspend fun importSteamWishlist(steamIdInput: String): Result<Int> {
         return importSteamWishlistWithDiff(steamIdInput).map { it.totalCount }
+    }
+
+    /**
+     * Lädt Live-Preisdaten (Steam Store + historischer Tiefstpreis / SteamDB-Link) für ein einzelnes Spiel
+     * und aktualisiert optional den Preisalarm (`newTargetAlertEur`).
+     */
+    suspend fun refreshGamePriceAndAlert(
+        game: LocalGame,
+        newTargetAlertEur: Double? = null
+    ): Result<Pair<LocalGame, SteamPriceOverviewInfo>> {
+        val priceResult = externalRepository.fetchGamePriceOverview(game)
+        return priceResult.map { info ->
+            val latest = gameDao.getGameById(game.id) ?: game
+            val updated = applyPriceInfoToGame(latest, info, overrideTargetAlertEur = newTargetAlertEur)
+            gameDao.upsertGame(updated)
+            updated to info
+        }
+    }
+
+    /**
+     * Speichert oder deaktiviert (`0.0`) den Preisalarm für ein Spiel sofort lokal und prüft den aktuellen Preis.
+     */
+    suspend fun updatePriceAlertTarget(game: LocalGame, targetAlertEur: Double): LocalGame {
+        val sanitizedTarget = targetAlertEur.coerceAtLeast(0.0)
+        val latest = gameDao.getGameById(game.id) ?: game
+        val currentEur = if (latest.currentPriceCents >= 0) latest.currentPriceCents / 100.0 else -1.0
+        val isTriggered = sanitizedTarget > 0.0 && currentEur >= 0.0 && currentEur <= sanitizedTarget + 0.001
+        val updated = latest.copy(
+            targetPriceAlertEur = sanitizedTarget,
+            isPriceAlertTriggered = isTriggered,
+            updatedAtEpoch = System.currentTimeMillis()
+        )
+        gameDao.upsertGame(updated)
+        return updated
+    }
+
+    /**
+     * Aktualisiert gebündelt die aktuellen Steam-Preise für alle Spiele in der Sammlung
+     * und gibt eine Liste aller Spiele zurück, deren Preisalarm erreicht wurde.
+     */
+    suspend fun refreshAllPricesAndCheckAlerts(): Result<List<String>> = runCatching {
+        val allGames = gameDao.getAllGamesSnapshot()
+        val steamGames = allGames.mapNotNull { game ->
+            val appId = game.id.removePrefix("steam_").toLongOrNull() ?: return@mapNotNull null
+            appId to game
+        }
+        if (steamGames.isEmpty()) return@runCatching emptyList()
+
+        // Priorisiere Wunschlisten-Spiele und Spiele mit aktivem Preisalarm
+        val prioritized = steamGames.sortedByDescending { (_, g) ->
+            (if (g.targetPriceAlertEur > 0.0) 2 else 0) + (if (!g.isOwned) 1 else 0)
+        }.take(100)
+
+        val priceMap = externalRepository.fetchBulkSteamPrices(prioritized.map { it.first })
+        val updatedGames = mutableListOf<LocalGame>()
+        val triggeredDescriptions = mutableListOf<String>()
+
+        for ((appId, game) in prioritized) {
+            val info = priceMap[appId] ?: continue
+            val updated = applyPriceInfoToGame(game, info)
+            updatedGames.add(updated)
+            if (updated.isPriceAlertTriggered) {
+                triggeredDescriptions.add("${updated.title} (${updated.formattedPrice})")
+            }
+        }
+
+        if (updatedGames.isNotEmpty()) {
+            gameDao.upsertGames(updatedGames)
+        }
+        triggeredDescriptions
+    }
+
+    /**
+     * Lädt das Steam-Inventar des Nutzers für das gewählte Spiel (`appId`/`contextId`).
+     */
+    suspend fun fetchSteamInventory(
+        steamIdInput: String,
+        appId: Long,
+        contextId: Long
+    ): Result<List<SteamInventoryItem>> {
+        return externalRepository.fetchSteamInventory(
+            rawSteamIdInput = steamIdInput,
+            appId = appId,
+            contextId = contextId
+        )
+    }
+
+    /**
+     * Lädt den aktuellen Steam Community Market Preis für ein Inventar-Item.
+     */
+    suspend fun fetchSteamMarketItemPrice(
+        appId: Long,
+        marketHashName: String
+    ): Result<String> {
+        return externalRepository.fetchSteamMarketItemPrice(appId, marketHashName)
     }
 
     /**

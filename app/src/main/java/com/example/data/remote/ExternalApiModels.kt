@@ -1,36 +1,27 @@
 package com.example.data.remote
 
 import com.example.config.AppConfig
+import com.example.data.local.LocalGame
 import com.squareup.moshi.Json
 import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Datenmodelle für Twitch OAuth2, IGDB API v4 und Steam Web/Store API (inkl. Errungenschaften).
+ * Datenmodelle für Twitch OAuth2, IGDB API v4, Steam Web/Store API,
+ * SteamDB / Live-Preis-Tracker sowie das Steam-Inventar.
  */
 
-/**
- * Antwort des Twitch OAuth2 Token-Endpunkts (`POST oauth2/token`).
- */
 data class TwitchTokenResponse(
     @param:Json(name = "access_token") val accessToken: String = "",
     @param:Json(name = "expires_in") val expiresIn: Long = 0L,
     @param:Json(name = "token_type") val tokenType: String = ""
 )
 
-/**
- * IGDB Spiel-DTO (`POST https://api.igdb.com/v4/games`).
- * Enthält `id`, `name` und das verschachtelte `cover`-Objekt mit `image_id`.
- */
 data class IgdbGameDto(
     @param:Json(name = "id") val id: Long = 0L,
     @param:Json(name = "name") val name: String = "",
     @param:Json(name = "cover") val cover: IgdbCoverDto? = null
 ) {
-    /**
-     * Mapper-Funktion, die die verschachtelte `cover.image_id` in die fertige Coil-URL umwandelt:
-     * `https://images.igdb.com/igdb/image/upload/t_cover_big/{image_id}.jpg`
-     */
     fun toCoverBigUrl(): String {
         val imageId = cover?.imageId?.trim().orEmpty()
         return if (imageId.isNotEmpty()) {
@@ -41,17 +32,11 @@ data class IgdbGameDto(
     }
 }
 
-/**
- * Verschachteltes `cover`-Objekt aus der IGDB-Antwort (`fields name, cover.image_id;`).
- */
 data class IgdbCoverDto(
     @param:Json(name = "id") val id: Long = 0L,
     @param:Json(name = "image_id") val imageId: String? = null
 )
 
-/**
- * Steam Store Search API Antwort (`store.steampowered.com/api/storesearch/`).
- */
 data class SteamStoreSearchResponse(
     @param:Json(name = "total") val total: Int = 0,
     @param:Json(name = "items") val items: List<SteamStoreSearchItemDto>? = null
@@ -63,9 +48,6 @@ data class SteamStoreSearchItemDto(
     @param:Json(name = "tiny_image") val tinyImage: String? = null
 )
 
-/**
- * Steam Web API: `IPlayerService/GetOwnedGames/v0001/`
- */
 data class SteamOwnedGamesEnvelope(
     @param:Json(name = "response") val response: SteamOwnedGamesResponse? = null
 )
@@ -82,9 +64,6 @@ data class SteamOwnedGameDto(
     @param:Json(name = "img_icon_url") val imgIconUrl: String? = null
 )
 
-/**
- * Steam Web API: `IWishlistService/GetWishlist/v1/`
- */
 data class SteamWishlistEnvelope(
     @param:Json(name = "response") val response: SteamWishlistResponse? = null
 )
@@ -99,9 +78,6 @@ data class SteamWishlistItemDto(
     @param:Json(name = "date_added") val dateAdded: Long? = null
 )
 
-/**
- * Steam Web API: `ISteamUser/ResolveVanityURL/v0001/`
- */
 data class SteamVanityEnvelope(
     @param:Json(name = "response") val response: SteamVanityResponse? = null
 )
@@ -112,9 +88,6 @@ data class SteamVanityResponse(
     @param:Json(name = "message") val message: String? = null
 )
 
-/**
- * Steam Web API: `ISteamUserStats/GetPlayerAchievements/v0001/`
- */
 data class SteamPlayerAchievementsEnvelope(
     @param:Json(name = "playerstats") val playerStats: SteamPlayerStatsDto? = null
 )
@@ -134,10 +107,6 @@ data class SteamPlayerAchievementDto(
     @param:Json(name = "description") val description: String? = null
 )
 
-/**
- * Steam Web API: `ISteamUserStats/GetSchemaForGame/v2/`
- * Liefert Icons, Titel, Beschreibungen und das `hidden`-Flag (`1` = Spoiler/Versteckt).
- */
 data class SteamGameSchemaEnvelope(
     @param:Json(name = "game") val game: SteamGameSchemaDto? = null
 )
@@ -154,15 +123,12 @@ data class SteamAvailableGameStatsDto(
 data class SteamSchemaAchievementDto(
     @param:Json(name = "name") val apiName: String = "",
     @param:Json(name = "displayName") val displayName: String? = null,
-    @param:Json(name = "hidden") val hidden: Int = 0, // 1 = Versteckte Errungenschaft (Spoiler!)
+    @param:Json(name = "hidden") val hidden: Int = 0,
     @param:Json(name = "description") val description: String? = null,
     @param:Json(name = "icon") val icon: String? = null,
     @param:Json(name = "icongray") val iconGray: String? = null
 )
 
-/**
- * Domain-Modell für eine Spiel-Errungenschaft (Achievement) inkl. Spoiler-Schutz.
- */
 data class SteamAchievement(
     val apiName: String,
     val title: String,
@@ -220,14 +186,117 @@ object SteamAchievementSerializer {
     }
 }
 
-/**
- * Vereinheitlichtes Suchergebnis-Modell für die UI (IGDB & Steam).
- */
 data class ExternalGameSearchResult(
     val apiId: String,
     val title: String,
     val coverImageUrl: String,
     val releaseYear: String = "",
     val genres: String = "",
-    val sourceLabel: String // z.B. "IGDB" oder "STEAM"
+    val sourceLabel: String
 )
+
+/**
+ * Ergebnisbericht des Steam-Bibliotheks-Imports inkl. Diagnose-Status,
+ * falls Steam ohne Web-Session / wegen privater Spieldetails nur die ~6 Profil-Vorschauspiele zurückgibt.
+ */
+data class SteamLibraryImportReport(
+    val games: List<LocalGame>,
+    val usedWebApi: Boolean = false,
+    val usedAuthenticatedSession: Boolean = false,
+    val onlyPublicShowcaseFound: Boolean = false
+)
+
+/**
+ * Live-Preis- & SteamDB-Informationen für ein Spiel.
+ */
+data class SteamPriceOverviewInfo(
+    val steamAppId: Long,
+    val currentPriceCents: Int, // 0 = Kostenlos, > 0 = Cent
+    val originalPriceCents: Int,
+    val discountPercent: Int,
+    val formattedCurrentPrice: String,
+    val formattedOriginalPrice: String = "",
+    val lowestHistoricalPrice: String = "",
+    val steamDbUrl: String = "https://steamdb.info/app/$steamAppId/",
+    val steamStoreUrl: String = "https://store.steampowered.com/app/$steamAppId/"
+) {
+    val appId: Long
+        get() = steamAppId
+    val formattedPrice: String
+        get() = formattedCurrentPrice
+}
+
+/**
+ * Unterstützte Steam-Inventar-Kategorien (Context-Auswahl).
+ */
+enum class SteamInventoryGameContext(
+    val label: String,
+    val subtitle: String,
+    val appId: Long,
+    val contextId: Long
+) {
+    STEAM_COMMUNITY(
+        label = "Steam Community",
+        subtitle = "Sammelkarten, Hintergründe, Emoticons & Booster",
+        appId = 753L,
+        contextId = 6L
+    ),
+    CS2(
+        label = "Counter-Strike 2",
+        subtitle = "CS2 / CS:GO Skins, Cases, Sticker & Agents",
+        appId = 730L,
+        contextId = 2L
+    ),
+    DOTA2(
+        label = "Dota 2",
+        subtitle = "Cosmetics, Immortals & Sets",
+        appId = 570L,
+        contextId = 2L
+    ),
+    TF2(
+        label = "Team Fortress 2",
+        subtitle = "Items, Hüte, Mann Co. Kisten & Waffen",
+        appId = 440L,
+        contextId = 2L
+    ),
+    RUST(
+        label = "Rust",
+        subtitle = "Skins, Kleidung & Ausrüstung",
+        appId = 252490L,
+        contextId = 2L
+    ),
+    PUBG(
+        label = "PUBG: Battlegrounds",
+        subtitle = "Outfits, Waffen-Skins & Kisten",
+        appId = 578080L,
+        contextId = 2L
+    )
+}
+
+/**
+ * Einzelnes Item aus dem Steam-Inventar eines Spielers.
+ */
+data class SteamInventoryItem(
+    val assetId: String,
+    val classId: String,
+    val appId: Long,
+    val contextId: Long,
+    val name: String,
+    val marketHashName: String,
+    val typeDescription: String,
+    val iconUrl: String,
+    val amount: Int = 1,
+    val rarityColorHex: String = "",
+    val isTradable: Boolean = false,
+    val isMarketable: Boolean = false,
+    val marketPriceFormatted: String = ""
+) {
+    val typeLabel: String
+        get() = typeDescription
+
+    val steamMarketUrl: String
+        get() = "https://steamcommunity.com/market/listings/$appId/${ java.net.URLEncoder.encode(marketHashName.ifBlank { name }, "UTF-8").replace("+", "%20") }"
+
+    val steamDbAppUrl: String
+        get() = "https://steamdb.info/app/$appId/items/"
+}

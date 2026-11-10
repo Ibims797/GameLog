@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">Story Games</string>
+    <string name="tab_library">Meine Bibliothek</string>
+    <string name="tab_wishlist">Wunschliste</string>
+    <string name="tab_community">Community Ranking</string>
+    <string name="tab_settings">Einstellungen</string>
+    <string name="sign_in_google">Sign in with Google (Cloud &amp; Community)</string>
+    <string name="sign_in_steam">Steam-Login (SteamID64 via OpenID verknüpfen)</string>
+    <string name="platinum_100_run">100% Platin Run</string>
+    <string name="would_you_recommend">Würdest du es weiterempfehlen?</string>
+</resources>

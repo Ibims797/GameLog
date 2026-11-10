@@ -13,9 +13,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -28,6 +29,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.EmojiEvents
+import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.Sell
 import androidx.compose.material.icons.filled.ShoppingCartCheckout
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.Star
@@ -63,15 +66,18 @@ import com.example.data.local.LocalGame
 import com.example.ui.theme.PlatinumGlowAccent
 import com.example.ui.theme.PlatinumGlowPrimary
 import com.example.ui.theme.PlatinumGlowSecondary
+import java.util.Locale
 
 /**
  * Listen-Element für ein Spiel (`LocalGame`).
  * Features:
  * - Passt das Game-Icon / Cover-Bild dynamisch an die Fensterbreite an (`BoxWithConstraints` + `ContentScale.Fit`),
  *   sodass weder breite Steam-Header noch vertikale IGDB-Cover jemals abgeschnitten werden.
+ * - Zeigt aktuelle Steam/SteamDB-Preise (`formattedPrice`), Rabatte (`-XX%`) und aktive/ausgelöste Preisalarme (`🔔 Preisalarm!`).
  * - **100% Run Highlighting**: Spiele mit `is100Percent == true` erhalten einen animierten,
  *   leuchtenden Platin/Gold-Glow-Effekt um das gesamte Listen-Element.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun GameListCard(
     game: LocalGame,
@@ -123,6 +129,12 @@ fun GameListCard(
                 ),
                 shape = cardShape
             )
+    } else if (game.isPriceAlertTriggered) {
+        Modifier.border(
+            width = 1.8.dp,
+            color = Color(0xFF4ADE80),
+            shape = cardShape
+        )
     } else {
         Modifier.border(
             width = 1.dp,
@@ -229,11 +241,27 @@ fun GameListCard(
                             }
                         }
                     }
+
+                    if (game.discountPercent > 0) {
+                        Surface(
+                            color = Color(0xFF4C6B22),
+                            shape = RoundedCornerShape(topStart = 7.dp),
+                            modifier = Modifier.align(Alignment.BottomEnd)
+                        ) {
+                            Text(
+                                text = "-${game.discountPercent}%",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFBEEE11),
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                            )
+                        }
+                    }
                 }
 
                 Spacer(modifier = Modifier.width(12.dp))
 
-                // Titel, Bewertung & Status-Icons
+                // Titel, Bewertung, Preis & Status-Icons
                 Column(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(5.dp)
@@ -295,10 +323,10 @@ fun GameListCard(
                         }
                     }
 
-                    // Status-Pills (Gespielt, Empfohlen, 100% Platin)
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    // Status-Pills (Gespielt, Empfohlen, Aktueller Steam/SteamDB Preis & Preisalarm)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         StatusBadgePill(
                             icon = if (game.isOwned) Icons.Default.CheckCircle else Icons.Default.Bookmark,
@@ -311,6 +339,32 @@ fun GameListCard(
                                 icon = Icons.Default.ThumbUp,
                                 label = "Empfohlen",
                                 tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+
+                        if (game.formattedPrice.isNotBlank()) {
+                            val priceLabel = if (game.discountPercent > 0) {
+                                "${game.formattedPrice} (-${game.discountPercent}%)"
+                            } else {
+                                game.formattedPrice
+                            }
+                            StatusBadgePill(
+                                icon = Icons.Default.Sell,
+                                label = priceLabel,
+                                tint = if (game.discountPercent > 0) Color(0xFF4ADE80) else MaterialTheme.colorScheme.primary
+                            )
+                        }
+
+                        if (game.targetPriceAlertEur > 0.0) {
+                            val targetFormatted = String.format(Locale.GERMANY, "%.2f€", game.targetPriceAlertEur)
+                            StatusBadgePill(
+                                icon = Icons.Default.NotificationsActive,
+                                label = if (game.isPriceAlertTriggered) {
+                                    "🔔 Preisalarm erreicht! (≤ $targetFormatted)"
+                                } else {
+                                    "🔔 Alarm ≤ $targetFormatted"
+                                },
+                                tint = if (game.isPriceAlertTriggered) Color(0xFF4ADE80) else PlatinumGlowPrimary
                             )
                         }
                     }

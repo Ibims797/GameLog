@@ -3,6 +3,7 @@ package com.example.ui.screens
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,12 +18,17 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Sell
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -61,12 +67,14 @@ private enum class LibraryFilter {
     ALL,
     PLATINUM_100,
     PLAYED,
-    UNPLAYED
+    PRICE_ALERTS
 }
 
 /**
  * Tab 1: "Meine Bibliothek" (`isOwned == true`).
  * Startet komplett leer und lädt bei verknüpfter Steam-ID automatisch die eigene Steam-Spielebibliothek.
+ * Falls Steam ohne Web-Session nur die ~6 Profil-Showcase-Spiele öffentlich herausgibt, erscheint ein
+ * direkter 1-Tap "Steam Web-Login (Alle 250+ Spiele freischalten)" Banner.
  */
 @Composable
 fun LibraryScreen(
@@ -75,6 +83,8 @@ fun LibraryScreen(
     steamImportState: SteamImportState = SteamImportState(),
     onOpenSearch: () -> Unit,
     onSyncSteamLibraryNow: () -> Unit = {},
+    onOpenSteamWebLogin: () -> Unit = {},
+    onRefreshPricesAndAlerts: () -> Unit = {},
     onNavigateToSettingsSteamImport: () -> Unit,
     onSelectGame: (LocalGame) -> Unit,
     onQuickToggle100Percent: (LocalGame) -> Unit
@@ -86,13 +96,16 @@ fun LibraryScreen(
             LibraryFilter.ALL -> games
             LibraryFilter.PLATINUM_100 -> games.filter { it.is100Percent }
             LibraryFilter.PLAYED -> games.filter { it.isPlayed }
-            LibraryFilter.UNPLAYED -> games.filter { !it.isPlayed }
+            LibraryFilter.PRICE_ALERTS -> games.filter { it.targetPriceAlertEur > 0.0 || it.isPriceAlertTriggered }
         }
     }
 
     val totalGames = games.size
     val totalPlayed = games.count { it.isPlayed }
     val total100Runs = games.count { it.is100Percent }
+    val totalAlerts = games.count { it.targetPriceAlertEur > 0.0 }
+    val showFullLibraryUnlockCard = linkedSteamId.isNotBlank() &&
+        (steamImportState.onlyPublicShowcaseWarning || (totalGames in 1..15 && !steamImportState.hasSteamWebSession))
 
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
@@ -107,7 +120,7 @@ fun LibraryScreen(
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(160.dp)
+                        .height(164.dp)
                         .border(
                             width = 1.dp,
                             color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
@@ -153,28 +166,40 @@ fun LibraryScreen(
                                         color = MaterialTheme.colorScheme.primary
                                     )
                                     Text(
-                                        text = "Tippe auf ein Spiel für Errungenschaften, Notizen & 100% Run",
+                                        text = "Erfolge, SteamDB-Preise, Preisalarm & 100% Runs",
                                         style = MaterialTheme.typography.bodyMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
-                                if (linkedSteamId.isNotBlank()) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
                                     IconButton(
-                                        onClick = onSyncSteamLibraryNow,
-                                        enabled = !steamImportState.isImportingLibrary
+                                        onClick = onRefreshPricesAndAlerts,
+                                        modifier = Modifier.testTag("library_refresh_prices_button")
                                     ) {
-                                        if (steamImportState.isImportingLibrary) {
-                                            CircularProgressIndicator(
-                                                modifier = Modifier.size(20.dp),
-                                                strokeWidth = 2.dp,
-                                                color = MaterialTheme.colorScheme.primary
-                                            )
-                                        } else {
-                                            Icon(
-                                                imageVector = Icons.Default.Refresh,
-                                                contentDescription = "Steam-Bibliothek neu synchronisieren",
-                                                tint = MaterialTheme.colorScheme.primary
-                                            )
+                                        Icon(
+                                            imageVector = Icons.Default.Sell,
+                                            contentDescription = "Steam-Preise & Preisalarme aktualisieren",
+                                            tint = MaterialTheme.colorScheme.secondary
+                                        )
+                                    }
+                                    if (linkedSteamId.isNotBlank()) {
+                                        IconButton(
+                                            onClick = onSyncSteamLibraryNow,
+                                            enabled = !steamImportState.isImportingLibrary
+                                        ) {
+                                            if (steamImportState.isImportingLibrary) {
+                                                CircularProgressIndicator(
+                                                    modifier = Modifier.size(20.dp),
+                                                    strokeWidth = 2.dp,
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                            } else {
+                                                Icon(
+                                                    imageVector = Icons.Default.Refresh,
+                                                    contentDescription = "Steam-Bibliothek neu synchronisieren",
+                                                    tint = MaterialTheme.colorScheme.primary
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -227,7 +252,7 @@ fun LibraryScreen(
                                 color = MaterialTheme.colorScheme.onSecondaryContainer
                             )
                             Text(
-                                text = "Lade deine Steam-Spielebibliothek automatisch...",
+                                text = "Lade deine komplette Steam-Spielebibliothek automatisch...",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSecondaryContainer,
                                 fontWeight = FontWeight.Medium
@@ -237,11 +262,83 @@ fun LibraryScreen(
                 }
             }
 
+            // WICHTIGER HINWEIS-BANNER: Warum nur 6 Spiele gefunden wurden + 1-Tap Freischaltung für alle 250+ Spiele!
+            if (showFullLibraryUnlockCard && !steamImportState.isImportingLibrary) {
+                item {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(
+                                width = 1.5.dp,
+                                color = PlatinumGlowPrimary.copy(alpha = 0.7f),
+                                shape = RoundedCornerShape(18.dp)
+                            ),
+                        shape = RoundedCornerShape(18.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.75f)
+                        )
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.LockOpen,
+                                    contentDescription = null,
+                                    tint = PlatinumGlowPrimary
+                                )
+                                Text(
+                                    text = "Warum werden nur ~6 von 250+ Steam-Spielen erkannt?",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = PlatinumGlowPrimary,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Text(
+                                text = "Auf Steam steht deine Einstellung 'Privatsphäre -> Spieldetails' aktuell auf 'Nur Freunde' (Standard). Dadurch zeigt Steam nach außen nur die ~6 Showcase-Spiele deiner Profil-Startseite!\n\n" +
+                                    "Lösung (in 10 Sekunden): Logge dich unten einmal über den offiziellen Steam Web-Login ein (damit die App als du selbst auf deine 250+ Spiele & dein Inventar zugreifen darf) – ODER stelle auf Steam unter 'Profil bearbeiten -> Privatsphäre -> Spieldetails' auf 'Öffentlich'.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Button(
+                                    onClick = onOpenSteamWebLogin,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("unlock_all_250_steam_games_button"),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Public,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = "Steam Web-Login (Alle 250+ Spiele laden)",
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Filter-Leiste
             if (games.isNotEmpty()) {
                 item {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -266,6 +363,18 @@ fun LibraryScreen(
                             onClick = { activeFilter = LibraryFilter.PLAYED },
                             label = { Text("Gespielt ($totalPlayed)") }
                         )
+                        FilterChip(
+                            selected = activeFilter == LibraryFilter.PRICE_ALERTS,
+                            onClick = { activeFilter = LibraryFilter.PRICE_ALERTS },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.NotificationsActive,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                            },
+                            label = { Text("Preisalarme ($totalAlerts)") }
+                        )
                     }
                 }
             }
@@ -280,6 +389,7 @@ fun LibraryScreen(
                         statusMessage = steamImportState.statusMessage,
                         onOpenSearch = onOpenSearch,
                         onSyncSteamNow = onSyncSteamLibraryNow,
+                        onOpenSteamWebLogin = onOpenSteamWebLogin,
                         onNavigateToSteamImport = onNavigateToSettingsSteamImport
                     )
                 }
@@ -366,6 +476,7 @@ private fun EmptyLibraryCard(
     statusMessage: String?,
     onOpenSearch: () -> Unit,
     onSyncSteamNow: () -> Unit,
+    onOpenSteamWebLogin: () -> Unit,
     onNavigateToSteamImport: () -> Unit
 ) {
     Card(
@@ -402,11 +513,11 @@ private fun EmptyLibraryCard(
             )
             Text(
                 text = if (isFilterActive) {
-                    "Wähle oben einen anderen Filter oder markiere ein Spiel mit dem 100%-Platin-Button."
+                    "Wähle oben einen anderen Filter oder tippe auf ein Spiel, um einen Preisalarm / 100%-Run zu setzen."
                 } else if (linkedSteamId.isNotBlank()) {
-                    "Verknüpfte Steam-ID: $linkedSteamId • Tippe unten auf 'Steam synchronisieren' oder suche einzelne Spiele über IGDB/Steam."
+                    "Verknüpfte Steam-ID: $linkedSteamId • Tippe unten auf 'Steam Web-Login', um alle 250+ Spiele auch bei privater Einstellung zu laden."
                 } else {
-                    "Suche nach Story-Spielen über die IGDB/Steam-API oder verknüpfe deine Steam-ID für den vollständigen Bibliotheks-Import."
+                    "Suche nach Story-Spielen über die IGDB/Steam-API oder melde dich per Steam an für den vollständigen Bibliotheks-Import."
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -467,6 +578,20 @@ private fun EmptyLibraryCard(
                         text = if (linkedSteamId.isNotBlank()) "Steam Sync" else "Steam Import",
                         textAlign = TextAlign.Center
                     )
+                }
+            }
+
+            if (!isFilterActive) {
+                OutlinedButton(
+                    onClick = onOpenSteamWebLogin,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Icon(imageVector = Icons.Default.Public, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Offizieller Steam Web-Login (250+ Spiele freischalten)")
                 }
             }
         }

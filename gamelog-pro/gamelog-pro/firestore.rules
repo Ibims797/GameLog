@@ -1,0 +1,177 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 1: Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Striktes Admin-Prädikat (Bootstrapped Admin mit Anti-Email-Spoofing Guard `email_verified == true`
+    // oder eingetragener Admin-Eintrag in `/admins/{uid}`)
+    function isAdmin() {
+      return isSignedIn() && (
+        (request.auth.token.email == 'nico.schaefer.hn@gmail.com' && request.auth.token.email_verified == true) ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // Validation Helper for GlobalGameStats
+    function isValidGlobalGameStats(data) {
+      return data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+             data.coverImageUrl is string && data.coverImageUrl.size() <= 1000 &&
+             (data.averageRating is int || data.averageRating is float) &&
+             data.averageRating >= 0 && data.averageRating <= 5 &&
+             data.ratingSum is int && data.ratingSum >= 0 && data.ratingSum <= 10000000 &&
+             data.ratingCount is int && data.ratingCount >= 0 && data.ratingCount <= 2000000 &&
+             data.recommendCount is int && data.recommendCount >= 0 && data.recommendCount <= 2000000 &&
+             data.total100PercentRuns is int && data.total100PercentRuns >= 0 && data.total100PercentRuns <= 2000000 &&
+             data.isCommunityEntry is bool && data.isCommunityEntry == true &&
+             data.lastUpdatedBy is string && data.lastUpdatedBy == request.auth.uid && data.lastUpdatedBy.size() <= 128 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    // Validation Helper for UserGameContribution
+    function isValidUserGameContribution(data, userId, gameId) {
+      return data.userId is string && data.userId == request.auth.uid && data.userId == userId && data.userId.size() <= 128 &&
+             data.gameId is string && data.gameId == gameId && data.gameId.size() >= 1 && data.gameId.size() <= 128 &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+             data.coverImageUrl is string && data.coverImageUrl.size() <= 1000 &&
+             data.isPlayed is bool &&
+             data.isOwned is bool &&
+             data.is100Percent is bool &&
+             data.isRecommended is bool &&
+             data.personalRating is int && data.personalRating >= 0 && data.personalRating <= 5 &&
+             data.personalNote is string && data.personalNote.size() <= 2000 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    // Validation Helper for AdminApiSecrets (Cloud API-Tresor)
+    function isValidAdminApiSecrets(data) {
+      return data.twitchClientId is string && data.twitchClientId.size() <= 256 &&
+             data.twitchClientSecret is string && data.twitchClientSecret.size() <= 256 &&
+             data.steamApiKey is string && data.steamApiKey.size() <= 256 &&
+             data.updatedByUid is string && data.updatedByUid == request.auth.uid && data.updatedByUid.size() <= 128 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    // Collection 1: Global Community Game Stats
+    match /global_game_stats/{gameId} {
+      allow get: if isSignedIn() && isValidId(gameId) && (resource == null || existing().isCommunityEntry == true);
+      allow list: if isSignedIn() && existing().isCommunityEntry == true;
+
+      allow create: if isSignedIn() &&
+                       isValidId(gameId) &&
+                       incoming().keys().hasAll([
+                         'title', 'coverImageUrl', 'averageRating', 'ratingSum',
+                         'ratingCount', 'recommendCount', 'total100PercentRuns',
+                         'isCommunityEntry', 'lastUpdatedBy', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'title', 'coverImageUrl', 'averageRating', 'ratingSum',
+                         'ratingCount', 'recommendCount', 'total100PercentRuns',
+                         'isCommunityEntry', 'lastUpdatedBy', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidGlobalGameStats(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(gameId) &&
+                       isValidGlobalGameStats(incoming()) &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().isCommunityEntry == existing().isCommunityEntry &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'title', 'coverImageUrl', 'averageRating', 'ratingSum',
+                         'ratingCount', 'recommendCount', 'total100PercentRuns',
+                         'lastUpdatedBy', 'updatedAt'
+                       ]);
+
+      allow delete: if isAdmin();
+    }
+
+    // Collection 2: Per-User Game Contributions & Cloud Sync
+    match /users/{userId}/game_contributions/{gameId} {
+      allow get: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidId(gameId);
+      allow list: if isSignedIn() && request.auth.uid == userId && existing().userId == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+                       request.auth.uid == userId &&
+                       isValidId(userId) &&
+                       isValidId(gameId) &&
+                       incoming().keys().hasAll([
+                         'userId', 'gameId', 'title', 'coverImageUrl',
+                         'isPlayed', 'isOwned', 'is100Percent', 'isRecommended',
+                         'personalRating', 'personalNote', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'gameId', 'title', 'coverImageUrl',
+                         'isPlayed', 'isOwned', 'is100Percent', 'isRecommended',
+                         'personalRating', 'personalNote', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidUserGameContribution(incoming(), userId, gameId);
+
+      allow update: if isSignedIn() &&
+                       request.auth.uid == userId &&
+                       isValidId(userId) &&
+                       isValidId(gameId) &&
+                       isValidUserGameContribution(incoming(), userId, gameId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().gameId == existing().gameId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'title', 'coverImageUrl', 'isPlayed', 'isOwned',
+                         'is100Percent', 'isRecommended', 'personalRating',
+                         'personalNote', 'updatedAt'
+                       ]);
+
+      allow delete: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidId(gameId);
+    }
+
+    // Collection 3: Geschützter Admin-API-Key-Tresor (NUR für den verifizierten Admin les- und schreibbar!)
+    match /admin_vault/{secretDocId} {
+      allow get: if isAdmin() && secretDocId == 'api_secrets';
+      allow list: if false;
+
+      allow create: if isAdmin() &&
+                       secretDocId == 'api_secrets' &&
+                       incoming().keys().hasAll([
+                         'twitchClientId', 'twitchClientSecret', 'steamApiKey',
+                         'updatedByUid', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'twitchClientId', 'twitchClientSecret', 'steamApiKey',
+                         'updatedByUid', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidAdminApiSecrets(incoming());
+
+      allow update: if isAdmin() &&
+                       secretDocId == 'api_secrets' &&
+                       isValidAdminApiSecrets(incoming()) &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'twitchClientId', 'twitchClientSecret', 'steamApiKey',
+                         'updatedByUid', 'updatedAt'
+                       ]);
+
+      allow delete: if isAdmin() && secretDocId == 'api_secrets';
+    }
+  }
+}

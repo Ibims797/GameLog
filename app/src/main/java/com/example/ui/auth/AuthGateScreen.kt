@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.webkit.CookieManager
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
@@ -33,7 +34,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudOff
@@ -72,7 +72,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
@@ -241,7 +240,7 @@ fun signOutUser(
 /**
  * Auth-Gate Screen mit 3 klar getrennten Modi:
  * 1. Mit Google anmelden (Voller Funktionsumfang: Bewertungen, Empfehlungen, Community-Ranking & für nico.schaefer.hn@gmail.com das Admin-Panel).
- * 2. Nur mit Steam einloggen (Offline-fähig: Automatischer Import von Bibliothek, Wunschliste & Errungenschaften ohne Google-Zwang).
+ * 2. Nur mit Steam einloggen (Offline-fähig: Automatischer Import von Bibliothek, Wunschliste, Inventar & Errungenschaften ohne Google-Zwang).
  * 3. Offline-Modus starten (Lokale Room-Datenbank ohne Anmeldung nutzen).
  */
 @Composable
@@ -342,7 +341,7 @@ fun AuthGateScreen(
                             )
                         }
                         Text(
-                            text = "Bibliothek • Errungenschaften • 100% Runs • Community Hub",
+                            text = "Bibliothek • SteamDB Preise • Inventar • 100% Runs • Community",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurface
                         )
@@ -369,7 +368,7 @@ fun AuthGateScreen(
                     )
                     Text(
                         text = "• Google-Login: Schaltet Cloud-Bewertungen (1–5 Sterne), Empfehlungen & das globale Community-Ranking frei.\n" +
-                            "• Nur mit Steam / Offline: Lädt automatisch deine Steam-Bibliothek, Wunschliste & Errungenschaften für die lokale/offline Nutzung (ohne Bewertungs-Sync).",
+                            "• Nur mit Steam / Offline: Lädt automatisch deine komplette Steam-Bibliothek (250+ Spiele), Wunschliste, SteamDB-Preise, Inventar & Errungenschaften.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -520,18 +519,20 @@ fun AuthGateScreen(
 
 /**
  * 100% absturzsicherer Steam-Login-Dialog:
- * - Instanziiert standardmäßig KEINEN Android WebView beim Öffnen (verhindert Abstürze auf Geräten ohne Google Chrome!).
- * - Primäre Anmeldung: Eingabe der 17-stelligen SteamID64, des öffentlichen Steam-Profilnamens oder der Profil-URL.
- * - Optionaler Web-Login: Nur auf expliziten Klick hin und komplett in `runCatching` + Main-Thread-Handler gekapselt.
+ * - Unterstützt sowohl direkte Eingabe der SteamID64 / des Profilnamens als auch den offiziellen Steam-Web-Login.
+ * - Beim Steam-Web-Login werden die `steamLoginSecure` Session-Cookies im `CookieManager` gespeichert,
+ *   sodass auch komplett private/Freunde-geschützte Steam-Bibliotheken (alle 250+ Spiele!) und das Steam-Inventar
+ *   vollständig geladen werden können!
  */
 @Composable
 fun SteamOpenIdLoginDialog(
     onDismiss: () -> Unit,
-    onSteamIdVerified: (String) -> Unit
+    onSteamIdVerified: (String) -> Unit,
+    startWithWebView: Boolean = false
 ) {
     var manualSteamInput by remember { mutableStateOf("") }
     var manualInputError by remember { mutableStateOf<String?>(null) }
-    var showOptionalWebView by remember { mutableStateOf(false) }
+    var showOptionalWebView by remember { mutableStateOf(startWithWebView) }
     var webViewInitError by remember { mutableStateOf<String?>(null) }
 
     val returnUrl = "https://storygamestracker.app/auth/steam/callback"
@@ -570,22 +571,39 @@ fun SteamOpenIdLoginDialog(
         }
     }
 
+    fun tryExtractSteamIdFromCookies(): String? {
+        return try {
+            val cookieManager = CookieManager.getInstance()
+            val cookies = listOfNotNull(
+                cookieManager.getCookie("https://steamcommunity.com"),
+                cookieManager.getCookie("https://store.steampowered.com")
+            ).joinToString("; ")
+            // Format: steamLoginSecure=76561198012345678%7C%7C... oder 76561198012345678||...
+            val match = Regex("""steamLoginSecure=(\d{17})(?:%7C%7C|\|\|)""", RegexOption.IGNORE_CASE)
+                .find(cookies)
+            match?.groupValues?.getOrNull(1)
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Surface(
             modifier = Modifier
-                .fillMaxWidth(0.94f)
-                .padding(12.dp),
+                .fillMaxWidth(0.95f)
+                .padding(10.dp),
             shape = RoundedCornerShape(22.dp),
             color = MaterialTheme.colorScheme.surface
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
                     .padding(18.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 // Header
                 Row(
@@ -603,7 +621,7 @@ fun SteamOpenIdLoginDialog(
                             tint = MaterialTheme.colorScheme.primary
                         )
                         Text(
-                            text = "Steam-Login (Bibliothek & Erfolge)",
+                            text = "Steam-Login (Alle 250+ Spiele & Inventar)",
                             style = MaterialTheme.typography.titleMedium,
                             color = MaterialTheme.colorScheme.primary,
                             fontWeight = FontWeight.Bold
@@ -618,8 +636,8 @@ fun SteamOpenIdLoginDialog(
                 }
 
                 Text(
-                    text = "Gib deine 17-stellige SteamID64, deinen Steam-Profilnamen oder deinen Steam-Profillink ein. Deine Bibliothek, Wunschliste und Errungenschaften werden danach sofort automatisch geladen.",
-                    style = MaterialTheme.typography.bodyMedium,
+                    text = "Tipp: Wenn auf deinem Steam-Profil 'Spieldetails' auf 'Nur Freunde' steht, zeigt Steam öffentlich nur ~6 Showcase-Spiele an. Logge dich unten über die offizielle Steam-Webseite ein, um deine gesamte Bibliothek (250+ Spiele) sofort freizuschalten!",
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
@@ -660,31 +678,40 @@ fun SteamOpenIdLoginDialog(
                     },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(52.dp)
+                        .height(50.dp)
                         .testTag("steam_dialog_confirm_button"),
                     shape = RoundedCornerShape(14.dp)
                 ) {
                     Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Mit Steam einloggen & Bibliothek laden",
+                        text = "Mit Steam-ID synchronisieren",
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.Bold
                     )
                 }
 
                 if (!showOptionalWebView) {
-                    TextButton(
+                    OutlinedButton(
                         onClick = { showOptionalWebView = true },
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(50.dp)
+                            .testTag("steam_open_webview_button"),
+                        shape = RoundedCornerShape(14.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Public,
                             contentDescription = null,
-                            modifier = Modifier.size(16.dp)
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Alternativ über offizielle Steam-Webseite einloggen (OpenID)")
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Offizieller Steam Web-Login (Alle 250+ Spiele freischalten)",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 } else {
                     if (webViewInitError != null) {
@@ -701,16 +728,22 @@ fun SteamOpenIdLoginDialog(
                             )
                         }
                     } else {
+                        Text(
+                            text = "Melde dich unten bei Steam an und tippe auf 'Anmelden' (Sign In). Deine Session bleibt lokal gespeichert, damit alle 250+ Spiele erkannt werden:",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(340.dp)
+                                .height(390.dp)
                                 .clip(RoundedCornerShape(14.dp))
                                 .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.4f), RoundedCornerShape(14.dp))
                         ) {
                             SafeSteamWebView(
                                 openIdUrl = openIdUrl,
                                 tryExtractSteamId = ::tryExtractSteamIdFromUrl,
+                                tryExtractCookieSteamId = ::tryExtractSteamIdFromCookies,
                                 onVerified = onSteamIdVerified,
                                 onWebViewError = { errMsg ->
                                     webViewInitError = errMsg
@@ -728,6 +761,7 @@ fun SteamOpenIdLoginDialog(
 private fun SafeSteamWebView(
     openIdUrl: String,
     tryExtractSteamId: (String?) -> String?,
+    tryExtractCookieSteamId: () -> String?,
     onVerified: (String) -> Unit,
     onWebViewError: (String) -> Unit
 ) {
@@ -735,6 +769,9 @@ private fun SafeSteamWebView(
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
 
     fun dispatchSafely(steamId: String) {
+        try {
+            CookieManager.getInstance().flush()
+        } catch (_: Throwable) {}
         mainHandler.post {
             if (!hasDispatchedResult) {
                 hasDispatchedResult = true
@@ -750,12 +787,19 @@ private fun SafeSteamWebView(
                 WebView(ctx).apply {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
+                    try {
+                        val cm = CookieManager.getInstance()
+                        cm.setAcceptCookie(true)
+                        cm.setAcceptThirdPartyCookies(this, true)
+                    } catch (_: Throwable) {}
+
                     webViewClient = object : WebViewClient() {
                         override fun shouldOverrideUrlLoading(
                             view: WebView?,
                             request: WebResourceRequest?
                         ): Boolean {
-                            val extracted = tryExtractSteamId(request?.url?.toString())
+                            val urlStr = request?.url?.toString()
+                            val extracted = tryExtractSteamId(urlStr)
                             if (extracted != null) {
                                 dispatchSafely(extracted)
                                 return true
@@ -774,6 +818,24 @@ private fun SafeSteamWebView(
                                 return
                             }
                             super.onPageStarted(view, url, favicon)
+                        }
+
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            super.onPageFinished(view, url)
+                            try {
+                                CookieManager.getInstance().flush()
+                            } catch (_: Throwable) {}
+                            val extractedFromUrl = tryExtractSteamId(url)
+                            if (extractedFromUrl != null) {
+                                dispatchSafely(extractedFromUrl)
+                                return
+                            }
+                            // Falls sich der Nutzer erfolgreich auf steamcommunity.com eingeloggt hat
+                            // und das steamLoginSecure Cookie gesetzt wurde:
+                            val cookieSteamId = tryExtractCookieSteamId()
+                            if (cookieSteamId != null && url != null && !url.contains("/login")) {
+                                dispatchSafely(cookieSteamId)
+                            }
                         }
 
                         override fun onReceivedError(

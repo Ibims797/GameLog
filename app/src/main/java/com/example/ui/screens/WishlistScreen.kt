@@ -19,12 +19,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.BookmarkAdded
 import androidx.compose.material.icons.filled.CloudDownload
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Sell
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -34,20 +37,26 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.example.data.local.LocalGame
 import com.example.ui.components.GameListCard
+import com.example.ui.theme.PlatinumGlowPrimary
 import com.example.ui.viewmodel.SteamImportState
 
 /**
  * Tab 2: "Wunschliste" (`isOwned == false`).
  * Zeigt vorgemerkte Spiele aus der IGDB/Steam-Suche oder dem Steam-Wishlist-Import
- * inklusive automatischem Live-Updater im Hintergrund.
+ * inklusive automatischem Live-Updater, Live-SteamDB-Preisen und Preisalarm-Filter.
  */
 @Composable
 fun WishlistScreen(
@@ -58,10 +67,24 @@ fun WishlistScreen(
     onNavigateToSteamWishlistImport: () -> Unit,
     onToggleLiveUpdater: (Boolean) -> Unit = {},
     onTriggerLiveSyncNow: () -> Unit = {},
+    onRefreshPricesAndAlerts: () -> Unit = {},
     onSelectGame: (LocalGame) -> Unit,
     onQuickToggle100Percent: (LocalGame) -> Unit,
     onMoveToOwnedLibrary: (LocalGame) -> Unit
 ) {
+    var filterOnlyAlerts by remember { mutableStateOf(false) }
+
+    val activeAlertsCount = wishlistGames.count { it.targetPriceAlertEur > 0.0 }
+    val triggeredAlertsCount = wishlistGames.count { it.isPriceAlertTriggered }
+
+    val displayedGames = remember(wishlistGames, filterOnlyAlerts) {
+        if (filterOnlyAlerts) {
+            wishlistGames.filter { it.targetPriceAlertEur > 0.0 || it.isPriceAlertTriggered }
+        } else {
+            wishlistGames
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
             modifier = Modifier
@@ -96,32 +119,80 @@ fun WishlistScreen(
                                     color = MaterialTheme.colorScheme.secondary
                                 )
                                 Text(
-                                    text = "${wishlistGames.size} geplante Story-Abenteuer • Mit 1 Klick in Bibliothek verschiebbar",
+                                    text = "${wishlistGames.size} geplante Abenteuer • Tippe auf ein Spiel für SteamDB & Preisalarm",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
 
-                            if (linkedSteamId.isNotBlank()) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
                                 IconButton(
-                                    onClick = onTriggerLiveSyncNow,
-                                    enabled = !steamImportState.isImportingWishlist,
-                                    modifier = Modifier.testTag("wishlist_live_sync_now_button")
+                                    onClick = onRefreshPricesAndAlerts,
+                                    modifier = Modifier.testTag("wishlist_refresh_prices_button")
                                 ) {
-                                    if (steamImportState.isImportingWishlist) {
-                                        CircularProgressIndicator(
-                                            modifier = Modifier.size(20.dp),
-                                            strokeWidth = 2.dp,
-                                            color = MaterialTheme.colorScheme.secondary
-                                        )
-                                    } else {
-                                        Icon(
-                                            imageVector = Icons.Default.Refresh,
-                                            contentDescription = "Steam-Wunschliste sofort prüfen",
-                                            tint = MaterialTheme.colorScheme.secondary
-                                        )
+                                    Icon(
+                                        imageVector = Icons.Default.Sell,
+                                        contentDescription = "Steam-Preise & Preisalarme prüfen",
+                                        tint = PlatinumGlowPrimary
+                                    )
+                                }
+                                if (linkedSteamId.isNotBlank()) {
+                                    IconButton(
+                                        onClick = onTriggerLiveSyncNow,
+                                        enabled = !steamImportState.isImportingWishlist,
+                                        modifier = Modifier.testTag("wishlist_live_sync_now_button")
+                                    ) {
+                                        if (steamImportState.isImportingWishlist) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(20.dp),
+                                                strokeWidth = 2.dp,
+                                                color = MaterialTheme.colorScheme.secondary
+                                            )
+                                        } else {
+                                            Icon(
+                                                imageVector = Icons.Default.Refresh,
+                                                contentDescription = "Steam-Wunschliste sofort prüfen",
+                                                tint = MaterialTheme.colorScheme.secondary
+                                            )
+                                        }
                                     }
                                 }
+                            }
+                        }
+
+                        // Filterleiste für Preisalarme
+                        if (wishlistGames.isNotEmpty()) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                FilterChip(
+                                    selected = !filterOnlyAlerts,
+                                    onClick = { filterOnlyAlerts = false },
+                                    label = { Text("Alle (${wishlistGames.size})") }
+                                )
+                                FilterChip(
+                                    selected = filterOnlyAlerts,
+                                    onClick = { filterOnlyAlerts = !filterOnlyAlerts },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.NotificationsActive,
+                                            contentDescription = null,
+                                            tint = if (triggeredAlertsCount > 0) Color(0xFF4ADE80) else PlatinumGlowPrimary,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            if (triggeredAlertsCount > 0) {
+                                                "🔔 Preisalarme ($triggeredAlertsCount erreicht / $activeAlertsCount aktiv)"
+                                            } else {
+                                                "🔔 Preisalarme ($activeAlertsCount)"
+                                            }
+                                        )
+                                    }
+                                )
                             }
                         }
 
@@ -157,7 +228,7 @@ fun WishlistScreen(
                                         Column {
                                             Text(
                                                 text = if (steamImportState.isLiveUpdaterActive) {
-                                                    "Steam Wishlist Live-Updater aktiv"
+                                                    "Steam Wishlist & Preisalarm Live-Updater aktiv"
                                                 } else {
                                                     "Steam Wishlist Live-Updater pausiert"
                                                 },
@@ -167,9 +238,9 @@ fun WishlistScreen(
                                             )
                                             Text(
                                                 text = if (steamImportState.lastLiveSyncTimeText.isNotBlank()) {
-                                                    "Erkennt neue Steam-Wishlist-Spiele automatisch • Letzter Check: ${steamImportState.lastLiveSyncTimeText}"
+                                                    "Prüft live neue Wunschlisten-Spiele & Preisalarme • ${steamImportState.lastLiveSyncTimeText}"
                                                 } else {
-                                                    "Erkennt neu hinzugefügte Steam-Wishlist-Spiele automatisch im Hintergrund"
+                                                    "Erkennt neu hinzugefügte Steam-Wishlist-Spiele & Rabatte automatisch"
                                                 },
                                                 style = MaterialTheme.typography.labelMedium,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -188,7 +259,7 @@ fun WishlistScreen(
                 }
             }
 
-            if (wishlistGames.isEmpty()) {
+            if (displayedGames.isEmpty()) {
                 item {
                     Card(
                         modifier = Modifier
@@ -213,13 +284,21 @@ fun WishlistScreen(
                                 modifier = Modifier.size(48.dp)
                             )
                             Text(
-                                text = "Deine Wunschliste ist leer",
+                                text = if (filterOnlyAlerts) {
+                                    "Noch keine Preisalarme auf der Wunschliste"
+                                } else {
+                                    "Deine Wunschliste ist leer"
+                                },
                                 style = MaterialTheme.typography.titleLarge,
                                 color = MaterialTheme.colorScheme.onSurface,
                                 textAlign = TextAlign.Center
                             )
                             Text(
-                                text = "Füge kommende Story-Highlights über die IGDB/Steam-Suche hinzu oder verknüpfe deine Steam-ID für den automatischen Live-Updater.",
+                                text = if (filterOnlyAlerts) {
+                                    "Tippe auf ein beliebiges Spiel und wähle unter 'SteamDB & Preisalarm Tracker' z.B. 'Alarm auf aktuellen Preis setzen'."
+                                } else {
+                                    "Füge kommende Story-Highlights über die IGDB/Steam-Suche hinzu oder verknüpfe deine Steam-ID für den automatischen Live-Updater."
+                                },
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 textAlign = TextAlign.Center
@@ -269,7 +348,7 @@ fun WishlistScreen(
                     }
                 }
             } else {
-                items(wishlistGames, key = { it.id }) { game ->
+                items(displayedGames, key = { it.id }) { game ->
                     GameListCard(
                         game = game,
                         onClick = { onSelectGame(game) },

@@ -14,10 +14,12 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.EmojiEvents
+import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.EmojiEvents
+import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SportsEsports
 import androidx.compose.material3.Icon
@@ -59,12 +61,14 @@ import com.example.data.preferences.ThemePreferencesRepository
 import com.example.data.remote.ExternalGamesRepository
 import com.example.data.repository.StoryGamesRepository
 import com.example.ui.auth.AuthGateScreen
+import com.example.ui.auth.SteamOpenIdLoginDialog
 import com.example.ui.auth.signOutUser
 import com.example.ui.components.ExternalGameSearchDialog
 import com.example.ui.components.GameDetailDialog
 import com.example.ui.screens.CommunityRankingScreen
 import com.example.ui.screens.LibraryScreen
 import com.example.ui.screens.SettingsScreen
+import com.example.ui.screens.SteamInventoryScreen
 import com.example.ui.screens.WishlistScreen
 import com.example.ui.theme.StoryGamesTheme
 import com.example.ui.viewmodel.StoryGamesViewModel
@@ -75,11 +79,12 @@ import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.launch
 
 /**
- * Die 4 Haupt-Tabs der Bottom Navigation mit perfekt unter den Icons zentrierten Titeln:
+ * Die 5 Haupt-Tabs der Bottom Navigation mit perfekt unter den Icons zentrierten Titeln:
  * 1. "Bibliothek"
  * 2. "Wunschliste"
- * 3. "Ranking"
- * 4. "Optionen"
+ * 3. "Inventar"
+ * 4. "Ranking"
+ * 5. "Optionen"
  */
 enum class MainTab(
     val route: String,
@@ -101,6 +106,13 @@ enum class MainTab(
         selectedIcon = Icons.Filled.Bookmark,
         unselectedIcon = Icons.Outlined.BookmarkBorder,
         testTag = "nav_tab_wishlist"
+    ),
+    INVENTORY(
+        route = "inventory",
+        label = "Inventar",
+        selectedIcon = Icons.Filled.Inventory2,
+        unselectedIcon = Icons.Outlined.Inventory2,
+        testTag = "nav_tab_inventory"
     ),
     COMMUNITY(
         route = "community",
@@ -251,9 +263,12 @@ fun AuthenticatedTrackerHub(
     val adminVaultState by viewModel.adminVaultState.collectAsStateWithLifecycle()
     val selectedGameForDetail by viewModel.selectedGameForDetail.collectAsStateWithLifecycle()
     val selectedGameAchievements by viewModel.selectedGameAchievements.collectAsStateWithLifecycle()
+    val selectedGamePriceState by viewModel.selectedGamePriceState.collectAsStateWithLifecycle()
+    val inventoryState by viewModel.inventoryState.collectAsStateWithLifecycle()
     val snackbarMessage by viewModel.snackbarMessage.collectAsStateWithLifecycle()
 
     var currentTab by rememberSaveable { mutableStateOf(MainTab.LIBRARY) }
+    var showInAppSteamWebLoginDialog by rememberSaveable { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
 
     if (currentTab != MainTab.LIBRARY) {
@@ -287,6 +302,8 @@ fun AuthenticatedTrackerHub(
                             currentTab = tab
                             if (tab == MainTab.WISHLIST) {
                                 viewModel.triggerImmediateWishlistLiveSync()
+                            } else if (tab == MainTab.INVENTORY && inventoryState.items.isEmpty()) {
+                                viewModel.loadSteamInventory()
                             }
                         },
                         alwaysShowLabel = true,
@@ -301,7 +318,7 @@ fun AuthenticatedTrackerHub(
                                 text = tab.label,
                                 modifier = Modifier.fillMaxWidth(),
                                 textAlign = TextAlign.Center,
-                                style = MaterialTheme.typography.labelMedium,
+                                style = MaterialTheme.typography.labelSmall,
                                 fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
@@ -326,6 +343,8 @@ fun AuthenticatedTrackerHub(
                         steamImportState = steamImportState,
                         onOpenSearch = { viewModel.openSearchDialog(targetOwnedLibrary = true) },
                         onSyncSteamLibraryNow = { viewModel.syncSteamLibraryAndWishlistAutomatically() },
+                        onOpenSteamWebLogin = { showInAppSteamWebLoginDialog = true },
+                        onRefreshPricesAndAlerts = { viewModel.refreshAllPricesAndAlerts() },
                         onNavigateToSettingsSteamImport = { currentTab = MainTab.SETTINGS },
                         onSelectGame = { viewModel.selectGameForDetail(it) },
                         onQuickToggle100Percent = { viewModel.toggle100PercentQuick(it) }
@@ -341,9 +360,29 @@ fun AuthenticatedTrackerHub(
                         onNavigateToSteamWishlistImport = { currentTab = MainTab.SETTINGS },
                         onToggleLiveUpdater = { viewModel.toggleLiveWishlistUpdater(it) },
                         onTriggerLiveSyncNow = { viewModel.triggerImmediateWishlistLiveSync() },
+                        onRefreshPricesAndAlerts = { viewModel.refreshAllPricesAndAlerts() },
                         onSelectGame = { viewModel.selectGameForDetail(it) },
                         onQuickToggle100Percent = { viewModel.toggle100PercentQuick(it) },
                         onMoveToOwnedLibrary = { viewModel.moveWishlistToOwnedLibrary(it) }
+                    )
+                }
+
+                MainTab.INVENTORY -> {
+                    SteamInventoryScreen(
+                        linkedSteamId = linkedSteamId,
+                        hasSteamWebSession = steamImportState.hasSteamWebSession,
+                        inventoryState = inventoryState,
+                        onSelectContext = { viewModel.selectInventoryContext(it) },
+                        onUpdateCustomInput = { appIdStr, ctxStr ->
+                            viewModel.updateCustomInventoryInput(appIdStr, ctxStr)
+                        },
+                        onLoadCustomInventory = { appId, ctxId ->
+                            viewModel.loadSteamInventory(customAppId = appId, customContextId = ctxId)
+                        },
+                        onRefreshInventory = { viewModel.loadSteamInventory() },
+                        onUpdateSearchQuery = { viewModel.updateInventorySearchQuery(it) },
+                        onCheckMarketPrice = { viewModel.loadMarketPriceForInventoryItem(it) },
+                        onOpenSteamWebLogin = { showInAppSteamWebLoginDialog = true }
                     )
                 }
 
@@ -376,6 +415,17 @@ fun AuthenticatedTrackerHub(
         }
     }
 
+    if (showInAppSteamWebLoginDialog) {
+        SteamOpenIdLoginDialog(
+            onDismiss = { showInAppSteamWebLoginDialog = false },
+            onSteamIdVerified = { verifiedSteamId ->
+                showInAppSteamWebLoginDialog = false
+                viewModel.onSteamWebSessionAuthenticated(verifiedSteamId)
+            },
+            startWithWebView = true
+        )
+    }
+
     // Externe Spielesuche (IGDB / Steam Store)
     ExternalGameSearchDialog(
         state = searchDialogState,
@@ -385,13 +435,16 @@ fun AuthenticatedTrackerHub(
         onDismiss = { viewModel.dismissSearchDialog() }
     )
 
-    // Detailansicht (Errungenschaften mit Spoiler-Schutz, Notizen, 5-Sterne-Rating, Weiterempfehlen-Toggle, 100% Run Button)
+    // Detailansicht (SteamDB & Preisalarm Tracker, Errungenschaften mit Spoiler-Schutz, Notizen, 5-Sterne-Rating, Weiterempfehlen, 100% Run)
     selectedGameForDetail?.let { detailGame ->
         GameDetailDialog(
             game = detailGame,
             achievementsState = selectedGameAchievements,
+            priceState = selectedGamePriceState,
             isGoogleSignedIn = viewModel.isGoogleSignedIn,
             onRefreshAchievements = { viewModel.loadAchievementsForGame(detailGame) },
+            onRefreshPrice = { viewModel.loadPriceForGame(detailGame) },
+            onSetPriceAlert = { targetEur -> viewModel.savePriceAlertForGame(detailGame, targetEur) },
             onRequestGoogleLogin = {
                 viewModel.selectGameForDetail(null)
                 onSignOut()
