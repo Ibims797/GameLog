@@ -22,12 +22,15 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CleaningServices
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Sell
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material3.Button
@@ -40,12 +43,15 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -60,8 +66,10 @@ import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.data.local.LocalGame
 import com.example.ui.components.GameListCard
+import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.theme.PlatinumGlowPrimary
 import com.example.ui.viewmodel.SteamImportState
+import java.util.Locale
 
 private enum class LibraryFilter {
     ALL,
@@ -72,9 +80,8 @@ private enum class LibraryFilter {
 
 /**
  * Tab 1: "Meine Bibliothek" (`isOwned == true`).
- * Startet komplett leer und lädt bei verknüpfter Steam-ID automatisch die eigene Steam-Spielebibliothek.
- * Falls Steam ohne Web-Session nur die ~6 Profil-Showcase-Spiele öffentlich herausgibt, erscheint ein
- * direkter 1-Tap "Steam Web-Login (Alle 250+ Spiele freischalten)" Banner.
+ * Enthält eine Echtzeit-Suchleiste für die eigene Bibliothek (250+ Spiele),
+ * Filter-Chips (Alle, 100% Platin, Gespielt, Preisalarme) und Duplikatschutz.
  */
 @Composable
 fun LibraryScreen(
@@ -85,25 +92,54 @@ fun LibraryScreen(
     onSyncSteamLibraryNow: () -> Unit = {},
     onOpenSteamWebLogin: () -> Unit = {},
     onRefreshPricesAndAlerts: () -> Unit = {},
+    onCleanupDuplicates: () -> Unit = {},
     onNavigateToSettingsSteamImport: () -> Unit,
     onSelectGame: (LocalGame) -> Unit,
     onQuickToggle100Percent: (LocalGame) -> Unit
 ) {
+    val strings = LocalAppStrings.current
     var activeFilter by remember { mutableStateOf(LibraryFilter.ALL) }
+    var searchQuery by rememberSaveable { mutableStateOf("") }
 
-    val filteredGames = remember(games, activeFilter) {
-        when (activeFilter) {
-            LibraryFilter.ALL -> games
-            LibraryFilter.PLATINUM_100 -> games.filter { it.is100Percent }
-            LibraryFilter.PLAYED -> games.filter { it.isPlayed }
-            LibraryFilter.PRICE_ALERTS -> games.filter { it.targetPriceAlertEur > 0.0 || it.isPriceAlertTriggered }
+    // Zusätzlicher Schutzmechanismus: Zeigt Spiele in der UI garantiert dedupliziert an
+    val distinctGames = remember(games) {
+        val seen = mutableSetOf<String>()
+        games.filter { game ->
+            val norm = game.title.lowercase(Locale.ROOT)
+                .replace("™", "")
+                .replace("®", "")
+                .replace(":", " ")
+                .replace("-", " ")
+                .trim()
+            val key = if (norm.isNotBlank()) norm else game.id
+            seen.add(key)
         }
     }
 
-    val totalGames = games.size
-    val totalPlayed = games.count { it.isPlayed }
-    val total100Runs = games.count { it.is100Percent }
-    val totalAlerts = games.count { it.targetPriceAlertEur > 0.0 }
+    val filteredGames = remember(distinctGames, activeFilter, searchQuery) {
+        val byCategory = when (activeFilter) {
+            LibraryFilter.ALL -> distinctGames
+            LibraryFilter.PLATINUM_100 -> distinctGames.filter { it.is100Percent }
+            LibraryFilter.PLAYED -> distinctGames.filter { it.isPlayed }
+            LibraryFilter.PRICE_ALERTS -> distinctGames.filter { it.targetPriceAlertEur > 0.0 || it.isPriceAlertTriggered }
+        }
+        val trimmedQuery = searchQuery.trim()
+        if (trimmedQuery.isBlank()) {
+            byCategory
+        } else {
+            val q = trimmedQuery.lowercase(Locale.ROOT)
+            byCategory.filter { game ->
+                game.title.lowercase(Locale.ROOT).contains(q) ||
+                    game.genres.lowercase(Locale.ROOT).contains(q) ||
+                    game.personalNote.lowercase(Locale.ROOT).contains(q)
+            }
+        }
+    }
+
+    val totalGames = distinctGames.size
+    val totalPlayed = distinctGames.count { it.isPlayed }
+    val total100Runs = distinctGames.count { it.is100Percent }
+    val totalAlerts = distinctGames.count { it.targetPriceAlertEur > 0.0 }
     val showFullLibraryUnlockCard = linkedSteamId.isNotBlank() &&
         (steamImportState.onlyPublicShowcaseWarning || (totalGames in 1..15 && !steamImportState.hasSteamWebSession))
 
@@ -113,20 +149,20 @@ fun LibraryScreen(
                 .fillMaxSize()
                 .testTag("library_lazy_column"),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 96.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             // Hero Header mit Statistiken
             item {
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(164.dp)
+                        .height(156.dp)
                         .border(
                             width = 1.dp,
                             color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
-                            shape = RoundedCornerShape(22.dp)
+                            shape = RoundedCornerShape(20.dp)
                         ),
-                    shape = RoundedCornerShape(22.dp)
+                    shape = RoundedCornerShape(20.dp)
                 ) {
                     Box(modifier = Modifier.fillMaxSize()) {
                         Image(
@@ -140,8 +176,8 @@ fun LibraryScreen(
                                 .fillMaxSize()
                                 .background(
                                     Brush.verticalGradient(
-                                        colors = listOf(
-                                            MaterialTheme.colorScheme.background.copy(alpha = 0.35f),
+                                        listOf(
+                                            MaterialTheme.colorScheme.background.copy(alpha = 0.50f),
                                             MaterialTheme.colorScheme.background.copy(alpha = 0.94f)
                                         )
                                     )
@@ -151,7 +187,7 @@ fun LibraryScreen(
                         Column(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .padding(18.dp),
+                                .padding(16.dp),
                             verticalArrangement = Arrangement.SpaceBetween
                         ) {
                             Row(
@@ -161,17 +197,27 @@ fun LibraryScreen(
                             ) {
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = "MEINE BIBLIOTHEK",
+                                        text = strings.libraryTitle,
                                         style = MaterialTheme.typography.headlineMedium,
                                         color = MaterialTheme.colorScheme.primary
                                     )
                                     Text(
-                                        text = "Erfolge, SteamDB-Preise, Preisalarm & 100% Runs",
-                                        style = MaterialTheme.typography.bodyMedium,
+                                        text = strings.librarySubtitle,
+                                        style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
                                 Row(verticalAlignment = Alignment.CenterVertically) {
+                                    IconButton(
+                                        onClick = onCleanupDuplicates,
+                                        modifier = Modifier.testTag("library_cleanup_duplicates_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.CleaningServices,
+                                            contentDescription = "Bibliothek bereinigen / Duplikate entfernen",
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
                                     IconButton(
                                         onClick = onRefreshPricesAndAlerts,
                                         modifier = Modifier.testTag("library_refresh_prices_button")
@@ -210,19 +256,19 @@ fun LibraryScreen(
                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
                                 StatMiniPill(
-                                    label = "Spiele",
+                                    label = strings.statGames,
                                     value = totalGames.toString(),
                                     tint = MaterialTheme.colorScheme.primary,
                                     modifier = Modifier.weight(1f)
                                 )
                                 StatMiniPill(
-                                    label = "Gespielt",
+                                    label = strings.statPlayed,
                                     value = totalPlayed.toString(),
                                     tint = MaterialTheme.colorScheme.secondary,
                                     modifier = Modifier.weight(1f)
                                 )
                                 StatMiniPill(
-                                    label = "100% Runs",
+                                    label = strings.stat100Runs,
                                     value = "🏆 $total100Runs",
                                     tint = PlatinumGlowPrimary,
                                     modifier = Modifier.weight(1f)
@@ -238,16 +284,16 @@ fun LibraryScreen(
                 item {
                     Surface(
                         color = MaterialTheme.colorScheme.secondaryContainer,
-                        shape = RoundedCornerShape(16.dp),
+                        shape = RoundedCornerShape(14.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(
-                            modifier = Modifier.padding(14.dp),
+                            modifier = Modifier.padding(12.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             CircularProgressIndicator(
-                                modifier = Modifier.size(22.dp),
+                                modifier = Modifier.size(20.dp),
                                 strokeWidth = 2.5.dp,
                                 color = MaterialTheme.colorScheme.onSecondaryContainer
                             )
@@ -271,16 +317,16 @@ fun LibraryScreen(
                             .border(
                                 width = 1.5.dp,
                                 color = PlatinumGlowPrimary.copy(alpha = 0.7f),
-                                shape = RoundedCornerShape(18.dp)
+                                shape = RoundedCornerShape(16.dp)
                             ),
-                        shape = RoundedCornerShape(18.dp),
+                        shape = RoundedCornerShape(16.dp),
                         colors = CardDefaults.cardColors(
                             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.75f)
                         )
                     ) {
                         Column(
-                            modifier = Modifier.padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -292,89 +338,127 @@ fun LibraryScreen(
                                     tint = PlatinumGlowPrimary
                                 )
                                 Text(
-                                    text = "Warum werden nur ~6 von 250+ Steam-Spielen erkannt?",
+                                    text = "Alle 250+ Steam-Spiele freischalten",
                                     style = MaterialTheme.typography.titleMedium,
                                     color = PlatinumGlowPrimary,
                                     fontWeight = FontWeight.Bold
                                 )
                             }
                             Text(
-                                text = "Auf Steam steht deine Einstellung 'Privatsphäre -> Spieldetails' aktuell auf 'Nur Freunde' (Standard). Dadurch zeigt Steam nach außen nur die ~6 Showcase-Spiele deiner Profil-Startseite!\n\n" +
-                                    "Lösung (in 10 Sekunden): Logge dich unten einmal über den offiziellen Steam Web-Login ein (damit die App als du selbst auf deine 250+ Spiele & dein Inventar zugreifen darf) – ODER stelle auf Steam unter 'Profil bearbeiten -> Privatsphäre -> Spieldetails' auf 'Öffentlich'.",
+                                text = "Logge dich einmal über den offiziellen Steam Web-Login ein oder stelle auf Steam unter 'Privatsphäre -> Spieldetails' auf 'Öffentlich'.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            Button(
+                                onClick = onOpenSteamWebLogin,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("unlock_all_250_steam_games_button"),
+                                shape = RoundedCornerShape(12.dp)
                             ) {
-                                Button(
-                                    onClick = onOpenSteamWebLogin,
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .testTag("unlock_all_250_steam_games_button"),
-                                    shape = RoundedCornerShape(12.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Public,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = "Steam Web-Login (Alle 250+ Spiele laden)",
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
+                                Icon(
+                                    imageVector = Icons.Default.Public,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Steam Web-Login (Alle 250+ Spiele laden)",
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
                         }
                     }
                 }
             }
 
-            // Filter-Leiste
-            if (games.isNotEmpty()) {
+            // NEU: Echtzeit-Suchleiste & Filter-Chips für die eigene Bibliothek
+            if (distinctGames.isNotEmpty()) {
                 item {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.FilterList,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        FilterChip(
-                            selected = activeFilter == LibraryFilter.ALL,
-                            onClick = { activeFilter = LibraryFilter.ALL },
-                            label = { Text("Alle ($totalGames)") }
-                        )
-                        FilterChip(
-                            selected = activeFilter == LibraryFilter.PLATINUM_100,
-                            onClick = { activeFilter = LibraryFilter.PLATINUM_100 },
-                            label = { Text("100% Platin ($total100Runs)") }
-                        )
-                        FilterChip(
-                            selected = activeFilter == LibraryFilter.PLAYED,
-                            onClick = { activeFilter = LibraryFilter.PLAYED },
-                            label = { Text("Gespielt ($totalPlayed)") }
-                        )
-                        FilterChip(
-                            selected = activeFilter == LibraryFilter.PRICE_ALERTS,
-                            onClick = { activeFilter = LibraryFilter.PRICE_ALERTS },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Default.NotificationsActive,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(15.dp)
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = searchQuery,
+                            onValueChange = { searchQuery = it },
+                            placeholder = {
+                                Text(
+                                    text = strings.librarySearchPlaceholder,
+                                    style = MaterialTheme.typography.bodyMedium
                                 )
                             },
-                            label = { Text("Preisalarme ($totalAlerts)") }
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.Search,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            },
+                            trailingIcon = {
+                                if (searchQuery.isNotBlank()) {
+                                    IconButton(
+                                        onClick = { searchQuery = "" },
+                                        modifier = Modifier.testTag("library_clear_search_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Clear,
+                                            contentDescription = "Suche löschen"
+                                        )
+                                    }
+                                }
+                            },
+                            singleLine = true,
+                            shape = RoundedCornerShape(14.dp),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedContainerColor = MaterialTheme.colorScheme.surface,
+                                unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("library_search_input")
                         )
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.FilterList,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            FilterChip(
+                                selected = activeFilter == LibraryFilter.ALL,
+                                onClick = { activeFilter = LibraryFilter.ALL },
+                                label = { Text("${strings.filterAll} ($totalGames)") }
+                            )
+                            FilterChip(
+                                selected = activeFilter == LibraryFilter.PLATINUM_100,
+                                onClick = { activeFilter = LibraryFilter.PLATINUM_100 },
+                                label = { Text("${strings.filter100Platinum} ($total100Runs)") }
+                            )
+                            FilterChip(
+                                selected = activeFilter == LibraryFilter.PLAYED,
+                                onClick = { activeFilter = LibraryFilter.PLAYED },
+                                label = { Text("${strings.filterPlayed} ($totalPlayed)") }
+                            )
+                            FilterChip(
+                                selected = activeFilter == LibraryFilter.PRICE_ALERTS,
+                                onClick = { activeFilter = LibraryFilter.PRICE_ALERTS },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.NotificationsActive,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                },
+                                label = { Text("${strings.filterPriceAlerts} ($totalAlerts)") }
+                            )
+                        }
                     }
                 }
             }
@@ -383,10 +467,14 @@ fun LibraryScreen(
             if (filteredGames.isEmpty()) {
                 item {
                     EmptyLibraryCard(
-                        isFilterActive = games.isNotEmpty(),
+                        isFilterActive = distinctGames.isNotEmpty(),
                         linkedSteamId = linkedSteamId,
                         isImporting = steamImportState.isImportingLibrary,
                         statusMessage = steamImportState.statusMessage,
+                        onResetFilterAndSearch = {
+                            searchQuery = ""
+                            activeFilter = LibraryFilter.ALL
+                        },
                         onOpenSearch = onOpenSearch,
                         onSyncSteamNow = onSyncSteamLibraryNow,
                         onOpenSteamWebLogin = onOpenSteamWebLogin,
@@ -419,9 +507,9 @@ fun LibraryScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Icon(imageVector = Icons.Default.Add, contentDescription = "Spiel suchen")
+                Icon(imageVector = Icons.Default.Add, contentDescription = strings.addGameButton)
                 Text(
-                    text = "Spiel hinzufügen",
+                    text = strings.addGameButton,
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.Bold
                 )
@@ -474,16 +562,18 @@ private fun EmptyLibraryCard(
     linkedSteamId: String,
     isImporting: Boolean,
     statusMessage: String?,
+    onResetFilterAndSearch: () -> Unit,
     onOpenSearch: () -> Unit,
     onSyncSteamNow: () -> Unit,
     onOpenSteamWebLogin: () -> Unit,
     onNavigateToSteamImport: () -> Unit
 ) {
+    val strings = LocalAppStrings.current
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 12.dp),
-        shape = RoundedCornerShape(22.dp),
+            .padding(top = 8.dp),
+        shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface
         )
@@ -491,97 +581,103 @@ private fun EmptyLibraryCard(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(24.dp),
+                .padding(22.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Icon(
                 imageVector = Icons.Default.SportsEsports,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(48.dp)
+                modifier = Modifier.size(44.dp)
             )
             Text(
                 text = if (isFilterActive) {
-                    "Keine Spiele für diesen Filter"
+                    strings.noGamesForSearchOrFilter
                 } else {
                     "Deine Bibliothek ist noch leer"
                 },
-                style = MaterialTheme.typography.titleLarge,
+                style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSurface,
                 textAlign = TextAlign.Center
             )
-            Text(
-                text = if (isFilterActive) {
-                    "Wähle oben einen anderen Filter oder tippe auf ein Spiel, um einen Preisalarm / 100%-Run zu setzen."
-                } else if (linkedSteamId.isNotBlank()) {
-                    "Verknüpfte Steam-ID: $linkedSteamId • Tippe unten auf 'Steam Web-Login', um alle 250+ Spiele auch bei privater Einstellung zu laden."
-                } else {
-                    "Suche nach Story-Spielen über die IGDB/Steam-API oder melde dich per Steam an für den vollständigen Bibliotheks-Import."
-                },
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center
-            )
 
-            if (!statusMessage.isNullOrBlank() && !isFilterActive) {
-                Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = statusMessage,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(10.dp),
-                        textAlign = TextAlign.Center
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(4.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Button(
-                    onClick = onOpenSearch,
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(48.dp)
-                        .testTag("empty_library_search_button"),
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Icon(imageVector = Icons.Default.Add, contentDescription = null)
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "IGDB / API Suche",
-                        textAlign = TextAlign.Center
-                    )
-                }
-
+            if (isFilterActive) {
                 OutlinedButton(
-                    onClick = if (linkedSteamId.isNotBlank()) onSyncSteamNow else onNavigateToSteamImport,
-                    enabled = !isImporting,
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(48.dp)
-                        .testTag("empty_library_steam_import_button"),
-                    shape = RoundedCornerShape(14.dp)
+                    onClick = onResetFilterAndSearch,
+                    shape = RoundedCornerShape(12.dp)
                 ) {
-                    Icon(imageVector = Icons.Default.CloudDownload, contentDescription = null)
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = if (linkedSteamId.isNotBlank()) "Steam Sync" else "Steam Import",
-                        textAlign = TextAlign.Center
-                    )
+                    Text(strings.resetSearchAndFilter)
                 }
-            }
+            } else {
+                Text(
+                    text = if (linkedSteamId.isNotBlank()) {
+                        "Verknüpfte Steam-ID: $linkedSteamId • Tippe unten auf 'Steam Sync' oder 'Steam Web-Login'."
+                    } else {
+                        "Suche nach Story-Spielen über die IGDB/Steam-API oder melde dich per Steam an für den vollständigen Bibliotheks-Import."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
 
-            if (!isFilterActive) {
+                if (!statusMessage.isNullOrBlank()) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = statusMessage,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(10.dp),
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Button(
+                        onClick = onOpenSearch,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("empty_library_search_button"),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.Add, contentDescription = null)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "IGDB / API Suche",
+                            textAlign = TextAlign.Center
+                        )
+                    }
+
+                    OutlinedButton(
+                        onClick = if (linkedSteamId.isNotBlank()) onSyncSteamNow else onNavigateToSteamImport,
+                        enabled = !isImporting,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("empty_library_steam_import_button"),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.CloudDownload, contentDescription = null)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (linkedSteamId.isNotBlank()) "Steam Sync" else "Steam Import",
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+
                 OutlinedButton(
                     onClick = onOpenSteamWebLogin,
                     modifier = Modifier

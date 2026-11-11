@@ -42,6 +42,11 @@ service cloud.firestore {
              data.ratingCount is int && data.ratingCount >= 0 && data.ratingCount <= 2000000 &&
              data.recommendCount is int && data.recommendCount >= 0 && data.recommendCount <= 2000000 &&
              data.total100PercentRuns is int && data.total100PercentRuns >= 0 && data.total100PercentRuns <= 2000000 &&
+             (!('star5Count' in data) || (data.star5Count is int && data.star5Count >= 0 && data.star5Count <= 2000000)) &&
+             (!('star4Count' in data) || (data.star4Count is int && data.star4Count >= 0 && data.star4Count <= 2000000)) &&
+             (!('star3Count' in data) || (data.star3Count is int && data.star3Count >= 0 && data.star3Count <= 2000000)) &&
+             (!('star2Count' in data) || (data.star2Count is int && data.star2Count >= 0 && data.star2Count <= 2000000)) &&
+             (!('star1Count' in data) || (data.star1Count is int && data.star1Count >= 0 && data.star1Count <= 2000000)) &&
              data.isCommunityEntry is bool && data.isCommunityEntry == true &&
              data.lastUpdatedBy is string && data.lastUpdatedBy == request.auth.uid && data.lastUpdatedBy.size() <= 128 &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
@@ -89,6 +94,7 @@ service cloud.firestore {
                        incoming().keys().hasOnly([
                          'title', 'coverImageUrl', 'averageRating', 'ratingSum',
                          'ratingCount', 'recommendCount', 'total100PercentRuns',
+                         'star5Count', 'star4Count', 'star3Count', 'star2Count', 'star1Count',
                          'isCommunityEntry', 'lastUpdatedBy', 'createdAt', 'updatedAt'
                        ]) &&
                        isValidGlobalGameStats(incoming());
@@ -101,6 +107,7 @@ service cloud.firestore {
                        incoming().diff(existing()).affectedKeys().hasOnly([
                          'title', 'coverImageUrl', 'averageRating', 'ratingSum',
                          'ratingCount', 'recommendCount', 'total100PercentRuns',
+                         'star5Count', 'star4Count', 'star3Count', 'star2Count', 'star1Count',
                          'lastUpdatedBy', 'updatedAt'
                        ]);
 

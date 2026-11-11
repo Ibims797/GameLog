@@ -36,10 +36,21 @@ interface IgdbApiService {
 
 /**
  * Retrofit-Service für die Steam Web API (`AppConfig.STEAM_API_BASE_URL`).
- * Importiert die eigene Spielebibliothek (`GetOwnedGames`), die Wunschliste (`GetWishlist`)
- * sowie die persönlichen & globalen Spiel-Errungenschaften (`GetPlayerAchievements` & `GetSchemaForGame`).
+ * Nutzt `IPlayerService/GetOwnedGames/v1/` mit den offiziellen Query-Parametern:
+ * `key`, `steamid`, `include_appinfo=true`, `include_played_free_games=true`, `format=json`.
  */
 interface SteamApiService {
+    @GET("IPlayerService/GetOwnedGames/v1/")
+    suspend fun getOwnedGamesV1Direct(
+        @Query("key") apiKey: String,
+        @Query("steamid") steamId: String,
+        @Query("include_appinfo") includeAppInfo: Boolean = true,
+        @Query("include_played_free_games") includePlayedFreeGames: Boolean = true,
+        @Query("include_free_sub") includeFreeSub: Boolean = true,
+        @Query("skip_unvetted_apps") skipUnvettedApps: Boolean = false,
+        @Query("format") format: String = "json"
+    ): SteamOwnedGamesEnvelope
+
     @GET("IPlayerService/GetOwnedGames/v0001/")
     suspend fun getOwnedGames(
         @Query("key") apiKey: String,

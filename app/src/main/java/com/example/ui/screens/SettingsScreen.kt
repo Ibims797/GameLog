@@ -3,6 +3,7 @@ package com.example.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,37 +17,46 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.ColorLens
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SportsEsports
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -61,8 +71,11 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.example.config.AppConfig
+import com.example.data.preferences.AppLanguage
 import com.example.data.preferences.AppThemeStyle
+import com.example.data.preferences.CustomThemeColors
 import com.example.ui.auth.SteamOpenIdLoginDialog
+import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.theme.CyberCyan
 import com.example.ui.theme.CyberMagenta
 import com.example.ui.theme.CyberYellow
@@ -84,25 +97,30 @@ import com.example.ui.theme.SynthTurquoise
 import com.example.ui.theme.WastelandAmber
 import com.example.ui.theme.WastelandPipGreen
 import com.example.ui.theme.WastelandRust
+import com.example.ui.theme.colorToHexString
+import com.example.ui.theme.parseHexColorSafe
 import com.example.ui.viewmodel.AdminVaultState
 import com.example.ui.viewmodel.SteamImportState
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
+import kotlin.math.roundToInt
 
 /**
- * Tab 4: "Einstellungen"
+ * Tab 5: "Optionen / Einstellungen"
  * Features:
- * 1. Dynamisches Theme-System mit 7 handgefertigten Designs (Speicherung über DataStore Preferences).
- * 2. Steam-Login (OpenID 2.0) & Vollständiger Steam-ID Import für Owned Games und Live-Wishlist.
- * 3. Geschützter Cloud-Admin-Tresor (`/admin_vault/api_secrets`):
- *    - KEINE API-Keys im APK oder in `BuildConfig`!
- *    - Durch Firestore Security Rules (`isAdmin()`) ausschließlich für den verifizierten Admin
- *      (`nico.schaefer.hn@gmail.com`) les- und schreibbar.
+ * 1. Sprachauswahl mit automatischer Erkennung der Systemsprache beim ersten App-Start.
+ * 2. Dynamisches Theme-System mit 7 handgefertigten Designs + vollem Custom-Theme-Editor (Farbwähler, RGB-Regler, Hex-Code).
+ * 3. Steam-Login (OpenID 2.0) & Vollständiger Steam-ID Import für Owned Games und Live-Wishlist.
+ * 4. Geschützter Cloud-Admin-Tresor (`/admin_vault/api_secrets`) exklusiv für `nico.schaefer.hn@gmail.com`.
  */
 @Composable
 fun SettingsScreen(
     selectedTheme: AppThemeStyle,
     onSelectTheme: (AppThemeStyle) -> Unit,
+    customThemeColors: CustomThemeColors = CustomThemeColors(),
+    onSaveCustomThemeColors: (CustomThemeColors) -> Unit = {},
+    selectedLanguage: AppLanguage = AppLanguage.SYSTEM,
+    onSelectLanguage: (AppLanguage) -> Unit = {},
     linkedSteamId: String,
     steamImportState: SteamImportState,
     adminVaultState: AdminVaultState,
@@ -111,19 +129,31 @@ fun SettingsScreen(
     onImportSteamWishlist: (String) -> Unit,
     onSaveAdminSecrets: (twitchClientId: String, twitchClientSecret: String, steamApiKey: String) -> Unit,
     onReloadAdminSecrets: () -> Unit,
+    onCleanupDuplicates: () -> Unit = {},
     onSignOut: () -> Unit
 ) {
+    val strings = LocalAppStrings.current
     var steamIdInput by remember(linkedSteamId) { mutableStateOf(linkedSteamId) }
     var showSteamOpenIdWebView by remember { mutableStateOf(false) }
 
+    // Custom Theme Editor State
+    var customPrimaryHex by remember(customThemeColors.primaryHex) { mutableStateOf(customThemeColors.primaryHex) }
+    var customSecondaryHex by remember(customThemeColors.secondaryHex) { mutableStateOf(customThemeColors.secondaryHex) }
+    var customBackgroundHex by remember(customThemeColors.backgroundHex) { mutableStateOf(customThemeColors.backgroundHex) }
+    var customSurfaceHex by remember(customThemeColors.surfaceHex) { mutableStateOf(customThemeColors.surfaceHex) }
+    var activeColorSlot by remember { mutableIntStateOf(0) } // 0 = Primary, 1 = Secondary, 2 = Background, 3 = Surface
+    var showCustomEditorExpanded by remember(selectedTheme) {
+        mutableStateOf(selectedTheme == AppThemeStyle.CUSTOM_DESIGN)
+    }
+
     var twitchClientIdInput by remember(adminVaultState.twitchClientId) {
-        mutableStateOf(adminVaultState.twitchClientId)
+        mutableStateOf(adminVaultState.twitchClientId.ifBlank { AppConfig.TWITCH_CLIENT_ID })
     }
     var twitchClientSecretInput by remember(adminVaultState.twitchClientSecret) {
-        mutableStateOf(adminVaultState.twitchClientSecret)
+        mutableStateOf(adminVaultState.twitchClientSecret.ifBlank { AppConfig.TWITCH_CLIENT_SECRET })
     }
     var steamApiKeyInput by remember(adminVaultState.steamApiKey) {
-        mutableStateOf(adminVaultState.steamApiKey)
+        mutableStateOf(adminVaultState.steamApiKey.ifBlank { AppConfig.STEAM_API_KEY })
     }
     var showSecretsPlain by remember { mutableStateOf(false) }
 
@@ -134,6 +164,7 @@ fun SettingsScreen(
     }
 
     val currentUser = Firebase.auth.currentUser
+    val systemLangCode = remember { AppLanguage.getDeviceSystemLanguageCode().uppercase() }
 
     LazyColumn(
         modifier = Modifier
@@ -142,7 +173,71 @@ fun SettingsScreen(
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 36.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // 1. DYNAMISCHES THEME-SYSTEM (7 DESIGNS IN DATASTORE PREFERENCES)
+        // 0. SPRACHE / LANGUAGE (AUTOMATISCHE SYSTEMSPRACHE + MANUELLE AUSWAHL)
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                )
+            ) {
+                Column(
+                    modifier = Modifier.padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Language,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = strings.languageSectionTitle,
+                            style = MaterialTheme.typography.titleLarge,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    Text(
+                        text = "${strings.languageSectionSubtitle} (${strings.systemLanguageDetectedLabel}: $systemLangCode)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        AppLanguage.entries.forEach { lang ->
+                            val isSelected = selectedLanguage == lang
+                            val labelText = if (lang == AppLanguage.SYSTEM) {
+                                "${lang.flagEmoji} ${lang.nativeLabel} ($systemLangCode)"
+                            } else {
+                                "${lang.flagEmoji} ${lang.nativeLabel}"
+                            }
+                            FilterChip(
+                                selected = isSelected,
+                                onClick = { onSelectLanguage(lang) },
+                                label = {
+                                    Text(
+                                        text = labelText,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                },
+                                modifier = Modifier.testTag("lang_chip_${lang.id}")
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 1. DYNAMISCHES THEME-SYSTEM (7 PRESET-DESIGNS + EIGENES CUSTOM-DESIGN)
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -165,13 +260,13 @@ fun SettingsScreen(
                             tint = MaterialTheme.colorScheme.primary
                         )
                         Text(
-                            text = "DYNAMISCHES DESIGN-SYSTEM (7 THEMES)",
+                            text = strings.themeSectionTitle,
                             style = MaterialTheme.typography.titleLarge,
                             color = MaterialTheme.colorScheme.primary
                         )
                     }
                     Text(
-                        text = "Wähle aus 7 handgefertigten Gaming-Designs. Deine Auswahl wird sofort angewendet und dauerhaft gespeichert.",
+                        text = strings.themeSectionSubtitle,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -186,6 +281,11 @@ fun SettingsScreen(
                             AppThemeStyle.NORDIC_VALHALLA -> listOf(NordicGlacierCyan, NordicBronzeGold, NordicFrostSilver)
                             AppThemeStyle.WASTELAND_PIPTECH -> listOf(WastelandPipGreen, WastelandAmber, WastelandRust)
                             AppThemeStyle.SAMURAI_SAKURA -> listOf(SamuraiSakuraRose, SamuraiImperialGold, SamuraiJade)
+                            AppThemeStyle.CUSTOM_DESIGN -> listOf(
+                                parseHexColorSafe(customPrimaryHex, Color(0xFF00E5FF)),
+                                parseHexColorSafe(customSecondaryHex, Color(0xFFFF4081)),
+                                parseHexColorSafe(customSurfaceHex, Color(0xFF181C2E))
+                            )
                         }
 
                         Surface(
@@ -201,7 +301,12 @@ fun SettingsScreen(
                                     },
                                     shape = RoundedCornerShape(16.dp)
                                 )
-                                .clickable { onSelectTheme(style) }
+                                .clickable {
+                                    onSelectTheme(style)
+                                    if (style == AppThemeStyle.CUSTOM_DESIGN) {
+                                        showCustomEditorExpanded = true
+                                    }
+                                }
                                 .testTag("theme_option_${style.id}"),
                             color = if (isSelected) {
                                 MaterialTheme.colorScheme.surfaceVariant
@@ -222,7 +327,12 @@ fun SettingsScreen(
                                 ) {
                                     RadioButton(
                                         selected = isSelected,
-                                        onClick = { onSelectTheme(style) }
+                                        onClick = {
+                                            onSelectTheme(style)
+                                            if (style == AppThemeStyle.CUSTOM_DESIGN) {
+                                                showCustomEditorExpanded = true
+                                            }
+                                        }
                                     )
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Column {
@@ -253,6 +363,340 @@ fun SettingsScreen(
                             }
                         }
                     }
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 4.dp),
+                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
+                    )
+
+                    // CUSTOM DESIGN EDITOR (VORGEFERTIGTE ANPASSEN ODER KOMPLETT EIGENES DESIGN BAUEN)
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { showCustomEditorExpanded = !showCustomEditorExpanded },
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ColorLens,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                    Column {
+                                        Text(
+                                            text = strings.customThemeEditorTitle,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        Text(
+                                            text = strings.customThemeEditorSubtitle,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                OutlinedButton(
+                                    onClick = { showCustomEditorExpanded = !showCustomEditorExpanded },
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Tune,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = if (showCustomEditorExpanded) "Einklappen" else "Anpassen",
+                                        style = MaterialTheme.typography.labelMedium
+                                    )
+                                }
+                            }
+
+                            if (showCustomEditorExpanded) {
+                                // Button: Aktuelles Vorlagen-Theme als Basis in den Custom-Editor laden
+                                OutlinedButton(
+                                    onClick = {
+                                        val (p, s, bg, surf) = when (selectedTheme) {
+                                            AppThemeStyle.CYBERPUNK_NEON -> listOf("#FCEE0A", "#00F0FF", "#08090F", "#121524")
+                                            AppThemeStyle.DARK_FANTASY -> listOf("#C92A2A", "#E6B800", "#0E0C12", "#1A1622")
+                                            AppThemeStyle.SCI_FI_SPACE -> listOf("#5CE1E6", "#9D4EDD", "#060814", "#10162B")
+                                            AppThemeStyle.RETRO_SYNTHWAVE -> listOf("#FF2A85", "#00F5D4", "#140726", "#230E3D")
+                                            AppThemeStyle.NORDIC_VALHALLA -> listOf("#38BDF8", "#F59E0B", "#0B131E", "#132032")
+                                            AppThemeStyle.WASTELAND_PIPTECH -> listOf("#22C55E", "#FACC15", "#0B120C", "#142217")
+                                            AppThemeStyle.SAMURAI_SAKURA -> listOf("#FB7185", "#FBBF24", "#130D14", "#221724")
+                                            AppThemeStyle.CUSTOM_DESIGN -> listOf(
+                                                customPrimaryHex,
+                                                customSecondaryHex,
+                                                customBackgroundHex,
+                                                customSurfaceHex
+                                            )
+                                        }
+                                        customPrimaryHex = p
+                                        customSecondaryHex = s
+                                        customBackgroundHex = bg
+                                        customSurfaceHex = surf
+                                        onSaveCustomThemeColors(
+                                            CustomThemeColors(
+                                                primaryHex = p,
+                                                secondaryHex = s,
+                                                backgroundHex = bg,
+                                                surfaceHex = surf
+                                            )
+                                        )
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = "Vorlage aus aktuellem Design übernehmen & anpassen",
+                                        style = MaterialTheme.typography.labelMedium
+                                    )
+                                }
+
+                                // 4 Farb-Slots zur Auswahl
+                                val slotLabels = listOf(
+                                    strings.colorPrimaryLabel,
+                                    strings.colorSecondaryLabel,
+                                    strings.colorBackgroundLabel,
+                                    strings.colorSurfaceLabel
+                                )
+                                val slotHexValues = listOf(
+                                    customPrimaryHex,
+                                    customSecondaryHex,
+                                    customBackgroundHex,
+                                    customSurfaceHex
+                                )
+
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    slotLabels.forEachIndexed { index, label ->
+                                        val isSlotSelected = activeColorSlot == index
+                                        val slotColor = parseHexColorSafe(slotHexValues[index], Color.Cyan)
+                                        FilterChip(
+                                            selected = isSlotSelected,
+                                            onClick = { activeColorSlot = index },
+                                            leadingIcon = {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(14.dp)
+                                                        .clip(CircleShape)
+                                                        .background(slotColor)
+                                                        .border(1.dp, Color.White.copy(alpha = 0.6f), CircleShape)
+                                                )
+                                            },
+                                            label = {
+                                                Text(
+                                                    text = label,
+                                                    style = MaterialTheme.typography.labelSmall
+                                                )
+                                            }
+                                        )
+                                    }
+                                }
+
+                                val currentActiveHex = when (activeColorSlot) {
+                                    0 -> customPrimaryHex
+                                    1 -> customSecondaryHex
+                                    2 -> customBackgroundHex
+                                    else -> customSurfaceHex
+                                }
+                                val currentActiveColor = parseHexColorSafe(currentActiveHex, Color(0xFF00E5FF))
+
+                                val updateActiveHex: (String) -> Unit = { newHex ->
+                                    when (activeColorSlot) {
+                                        0 -> customPrimaryHex = newHex
+                                        1 -> customSecondaryHex = newHex
+                                        2 -> customBackgroundHex = newHex
+                                        else -> customSurfaceHex = newHex
+                                    }
+                                }
+
+                                // Schnell-Farbpalette (Swatches) passend zum gewählten Slot
+                                val quickSwatches = if (activeColorSlot <= 1) {
+                                    listOf(
+                                        "#00E5FF", "#FF4081", "#FCEE0A", "#22C55E",
+                                        "#A855F7", "#F97316", "#EF4444", "#38BDF8",
+                                        "#FBBF24", "#14B8A6", "#EC4899", "#6366F1"
+                                    )
+                                } else {
+                                    listOf(
+                                        "#0B0E17", "#141A29", "#08090F", "#121524",
+                                        "#0E0C12", "#1A1622", "#140726", "#230E3D",
+                                        "#0B131E", "#132032", "#0B120C", "#1F242D"
+                                    )
+                                }
+
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    quickSwatches.forEach { swatchHex ->
+                                        val c = parseHexColorSafe(swatchHex, Color.Cyan)
+                                        val isCurrentSwatch = currentActiveHex.equals(swatchHex, ignoreCase = true)
+                                        Box(
+                                            modifier = Modifier
+                                                .size(28.dp)
+                                                .clip(CircleShape)
+                                                .background(c)
+                                                .border(
+                                                    width = if (isCurrentSwatch) 2.5.dp else 1.dp,
+                                                    color = if (isCurrentSwatch) Color.White else Color.White.copy(alpha = 0.35f),
+                                                    shape = CircleShape
+                                                )
+                                                .clickable {
+                                                    updateActiveHex(swatchHex)
+                                                }
+                                        )
+                                    }
+                                }
+
+                                // RGB Sliders für millimetergenaue Anpassung
+                                val redInt = (currentActiveColor.red * 255f).roundToInt().coerceIn(0, 255)
+                                val greenInt = (currentActiveColor.green * 255f).roundToInt().coerceIn(0, 255)
+                                val blueInt = (currentActiveColor.blue * 255f).roundToInt().coerceIn(0, 255)
+
+                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            text = "R: $redInt",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            modifier = Modifier.width(46.dp)
+                                        )
+                                        Slider(
+                                            value = redInt.toFloat(),
+                                            onValueChange = { newR ->
+                                                val updated = Color(
+                                                    red = newR.roundToInt().coerceIn(0, 255) / 255f,
+                                                    green = greenInt / 255f,
+                                                    blue = blueInt / 255f
+                                                )
+                                                updateActiveHex(colorToHexString(updated))
+                                            },
+                                            valueRange = 0f..255f,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            text = "G: $greenInt",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            modifier = Modifier.width(46.dp)
+                                        )
+                                        Slider(
+                                            value = greenInt.toFloat(),
+                                            onValueChange = { newG ->
+                                                val updated = Color(
+                                                    red = redInt / 255f,
+                                                    green = newG.roundToInt().coerceIn(0, 255) / 255f,
+                                                    blue = blueInt / 255f
+                                                )
+                                                updateActiveHex(colorToHexString(updated))
+                                            },
+                                            valueRange = 0f..255f,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            text = "B: $blueInt",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            modifier = Modifier.width(46.dp)
+                                        )
+                                        Slider(
+                                            value = blueInt.toFloat(),
+                                            onValueChange = { newB ->
+                                                val updated = Color(
+                                                    red = redInt / 255f,
+                                                    green = greenInt / 255f,
+                                                    blue = newB.roundToInt().coerceIn(0, 255) / 255f
+                                                )
+                                                updateActiveHex(colorToHexString(updated))
+                                            },
+                                            valueRange = 0f..255f,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
+                                }
+
+                                // Direkte Hex-Eingabe + Live-Farbvorschau
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(42.dp)
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(currentActiveColor)
+                                            .border(1.5.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(10.dp))
+                                    )
+                                    OutlinedTextField(
+                                        value = currentActiveHex,
+                                        onValueChange = { updateActiveHex(it) },
+                                        modifier = Modifier.weight(1f),
+                                        singleLine = true,
+                                        label = { Text("Hex-Farbcode (#RRGGBB)") }
+                                    )
+                                }
+
+                                Button(
+                                    onClick = {
+                                        onSaveCustomThemeColors(
+                                            CustomThemeColors(
+                                                primaryHex = customPrimaryHex,
+                                                secondaryHex = customSecondaryHex,
+                                                backgroundHex = customBackgroundHex,
+                                                surfaceHex = customSurfaceHex
+                                            )
+                                        )
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("apply_custom_theme_button"),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Icon(imageVector = Icons.Default.Palette, contentDescription = null)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = strings.applyCustomThemeButton,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -260,7 +704,8 @@ fun SettingsScreen(
         // 2. GESCHÜTZTER CLOUD-ADMIN-TRESOR (STRIKT EXKLUSIV FÜR nico.schaefer.hn@gmail.com)
         val isVerifiedAdmin = adminVaultState.isAdmin &&
             currentUser != null &&
-            currentUser.email.equals(AppConfig.ADMIN_EMAIL, ignoreCase = true) &&
+            (currentUser.email.equals(AppConfig.ADMIN_EMAIL, ignoreCase = true) ||
+                currentUser.providerData.any { it.email.equals(AppConfig.ADMIN_EMAIL, ignoreCase = true) }) &&
             currentUser.isEmailVerified
 
         if (isVerifiedAdmin) {
@@ -332,7 +777,7 @@ fun SettingsScreen(
                         }
 
                         Text(
-                            text = "Zero-APK-Secrets Schutz aktiv: Im APK sind keinerlei API-Keys enthalten. Deine Schlüssel liegen geschützt in Firestore (/admin_vault/api_secrets) und können durch Server-Security-Rules von keinem anderen Nutzer ausgelesen werden.",
+                            text = "Zero-APK-Secrets Schutz aktiv: Im APK sind keinerlei API-Keys enthalten. Dein 32-stelliger Steam Web API Key wird für den offiziellen Endpunkt IPlayerService/GetOwnedGames/v1/ (inkl. include_appinfo=true & include_played_free_games=true) genutzt.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -369,8 +814,15 @@ fun SettingsScreen(
 
                         OutlinedTextField(
                             value = steamApiKeyInput,
-                            onValueChange = { steamApiKeyInput = it },
-                            label = { Text("Steam Web API Key") },
+                            onValueChange = {
+                                steamApiKeyInput = it
+                                AppConfig.updateRuntimeAdminKeys(
+                                    twitchClientId = twitchClientIdInput,
+                                    twitchClientSecret = twitchClientSecretInput,
+                                    steamApiKey = it
+                                )
+                            },
+                            label = { Text("Steam Web API Key (32-stellig für GetOwnedGames/v1)") },
                             singleLine = true,
                             visualTransformation = visualTransform,
                             modifier = Modifier
@@ -464,7 +916,7 @@ fun SettingsScreen(
                     }
 
                     Text(
-                        text = "Verknüpfe deine 64-Bit Steam-ID manuell oder über den offiziellen Steam OpenID-Login, um deine Owned Games und Wunschliste direkt zu importieren.",
+                        text = "Verknüpfe deine 64-Bit Steam-ID manuell oder über den offiziellen Steam-Login, um alle Owned Games über IPlayerService/GetOwnedGames/v1/ (inkl. Free-to-Play) und deine Wunschliste zu importieren.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -472,7 +924,7 @@ fun SettingsScreen(
                     OutlinedTextField(
                         value = steamIdInput,
                         onValueChange = { steamIdInput = it },
-                        label = { Text("SteamID64 oder Steam Vanity-Profilname") },
+                        label = { Text("SteamID64 (17-stellig) oder Steam-Profilname") },
                         placeholder = { Text("z.B. 76561197960435530") },
                         singleLine = true,
                         modifier = Modifier
@@ -499,7 +951,21 @@ fun SettingsScreen(
                         }
 
                         Button(
-                            onClick = { onSaveSteamId(steamIdInput) },
+                            onClick = {
+                                if (isVerifiedAdmin && steamApiKeyInput.isNotBlank()) {
+                                    AppConfig.updateRuntimeAdminKeys(
+                                        twitchClientId = twitchClientIdInput,
+                                        twitchClientSecret = twitchClientSecretInput,
+                                        steamApiKey = steamApiKeyInput
+                                    )
+                                    onSaveAdminSecrets(
+                                        twitchClientIdInput,
+                                        twitchClientSecretInput,
+                                        steamApiKeyInput
+                                    )
+                                }
+                                onSaveSteamId(steamIdInput)
+                            },
                             modifier = Modifier
                                 .weight(1f)
                                 .height(48.dp)
@@ -517,7 +983,21 @@ fun SettingsScreen(
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Button(
-                            onClick = { onImportSteamLibrary(steamIdInput) },
+                            onClick = {
+                                if (isVerifiedAdmin && steamApiKeyInput.isNotBlank()) {
+                                    AppConfig.updateRuntimeAdminKeys(
+                                        twitchClientId = twitchClientIdInput,
+                                        twitchClientSecret = twitchClientSecretInput,
+                                        steamApiKey = steamApiKeyInput
+                                    )
+                                    onSaveAdminSecrets(
+                                        twitchClientIdInput,
+                                        twitchClientSecretInput,
+                                        steamApiKeyInput
+                                    )
+                                }
+                                onImportSteamLibrary(steamIdInput)
+                            },
                             enabled = !steamImportState.isImportingLibrary && !steamImportState.isImportingWishlist,
                             modifier = Modifier
                                 .weight(1f)
@@ -559,6 +1039,19 @@ fun SettingsScreen(
                                 Text("Wishlist Import")
                             }
                         }
+                    }
+
+                    OutlinedButton(
+                        onClick = onCleanupDuplicates,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("cleanup_duplicates_button"),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.CleaningServices, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Bibliothek bereinigen (Duplikate & DLCs entfernen)")
                     }
 
                     if (steamImportState.statusMessage != null) {

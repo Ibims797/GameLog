@@ -31,6 +31,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -56,7 +57,9 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.example.config.AppConfig
 import com.example.data.cloud.CloudGameRepository
 import com.example.data.local.AppDatabase
+import com.example.data.preferences.AppLanguage
 import com.example.data.preferences.AppThemeStyle
+import com.example.data.preferences.CustomThemeColors
 import com.example.data.preferences.ThemePreferencesRepository
 import com.example.data.remote.ExternalGamesRepository
 import com.example.data.repository.StoryGamesRepository
@@ -65,6 +68,8 @@ import com.example.ui.auth.SteamOpenIdLoginDialog
 import com.example.ui.auth.signOutUser
 import com.example.ui.components.ExternalGameSearchDialog
 import com.example.ui.components.GameDetailDialog
+import com.example.ui.i18n.LocalAppStrings
+import com.example.ui.i18n.stringsForLanguage
 import com.example.ui.screens.CommunityRankingScreen
 import com.example.ui.screens.LibraryScreen
 import com.example.ui.screens.SettingsScreen
@@ -148,9 +153,20 @@ fun StoryGamesRootApp() {
     val selectedTheme by themePreferences.selectedThemeFlow.collectAsStateWithLifecycle(
         initialValue = AppThemeStyle.CYBERPUNK_NEON
     )
+    val customThemeColors by themePreferences.customThemeColorsFlow.collectAsStateWithLifecycle(
+        initialValue = CustomThemeColors()
+    )
+    val selectedLanguage by themePreferences.selectedLanguageFlow.collectAsStateWithLifecycle(
+        initialValue = AppLanguage.fromSystemLocale()
+    )
     val linkedSteamId by themePreferences.linkedSteamIdFlow.collectAsStateWithLifecycle(
         initialValue = ""
     )
+
+    // Beim allerersten Start der App automatisch die Handy-Systemsprache einlesen und setzen
+    LaunchedEffect(Unit) {
+        themePreferences.initializeSystemLanguageIfUnset()
+    }
 
     var currentUser by remember { mutableStateOf(Firebase.auth.currentUser) }
     var isSessionUnlocked by rememberSaveable { mutableStateOf(false) }
@@ -176,46 +192,55 @@ fun StoryGamesRootApp() {
         currentUser != null || isSessionUnlocked || linkedSteamId.isNotBlank()
     )
 
-    StoryGamesTheme(themeStyle = selectedTheme) {
-        if (!canEnterApp) {
-            AuthGateScreen(
-                onAuthSuccess = {
-                    currentUser = Firebase.auth.currentUser
-                    forceShowAuthGate = false
-                    isSessionUnlocked = true
-                },
-                onSteamIdExtracted = { steamId ->
-                    forceShowAuthGate = false
-                    isSessionUnlocked = true
-                    scope.launch {
-                        themePreferences.setLinkedSteamId(steamId)
-                    }
-                },
-                onContinueDirectly = {
-                    forceShowAuthGate = false
-                    isSessionUnlocked = true
-                }
-            )
-        } else {
-            val activeSessionId = currentUser?.uid
-                ?: if (linkedSteamId.isNotBlank()) "steam_$linkedSteamId" else "local_player"
-            key(activeSessionId) {
-                AuthenticatedTrackerHub(
-                    currentUserId = activeSessionId,
-                    onSignOut = {
-                        AppConfig.clearRuntimeAdminKeys()
-                        isSessionUnlocked = false
-                        forceShowAuthGate = true
-                        val credentialManager = CredentialManager.create(context)
-                        signOutUser(
-                            credentialManager = credentialManager,
-                            scope = scope,
-                            onSignOutComplete = {
-                                currentUser = null
-                            }
-                        )
+    val activeStrings = remember(selectedLanguage) {
+        stringsForLanguage(selectedLanguage, AppLanguage.getDeviceSystemLanguageCode())
+    }
+
+    CompositionLocalProvider(LocalAppStrings provides activeStrings) {
+        StoryGamesTheme(
+            themeStyle = selectedTheme,
+            customColors = customThemeColors
+        ) {
+            if (!canEnterApp) {
+                AuthGateScreen(
+                    onAuthSuccess = {
+                        currentUser = Firebase.auth.currentUser
+                        forceShowAuthGate = false
+                        isSessionUnlocked = true
+                    },
+                    onSteamIdExtracted = { steamId ->
+                        forceShowAuthGate = false
+                        isSessionUnlocked = true
+                        scope.launch {
+                            themePreferences.setLinkedSteamId(steamId)
+                        }
+                    },
+                    onContinueDirectly = {
+                        forceShowAuthGate = false
+                        isSessionUnlocked = true
                     }
                 )
+            } else {
+                val activeSessionId = currentUser?.uid
+                    ?: if (linkedSteamId.isNotBlank()) "steam_$linkedSteamId" else "local_player"
+                key(activeSessionId) {
+                    AuthenticatedTrackerHub(
+                        currentUserId = activeSessionId,
+                        onSignOut = {
+                            AppConfig.clearRuntimeAdminKeys()
+                            isSessionUnlocked = false
+                            forceShowAuthGate = true
+                            val credentialManager = CredentialManager.create(context)
+                            signOutUser(
+                                credentialManager = credentialManager,
+                                scope = scope,
+                                onSignOutComplete = {
+                                    currentUser = null
+                                }
+                            )
+                        }
+                    )
+                }
             }
         }
     }
@@ -257,6 +282,8 @@ fun AuthenticatedTrackerHub(
     val wishlistGames by viewModel.wishlistGames.collectAsStateWithLifecycle()
     val communityRankingsState by viewModel.communityRankingsState.collectAsStateWithLifecycle()
     val selectedTheme by viewModel.selectedTheme.collectAsStateWithLifecycle()
+    val customThemeColors by viewModel.customThemeColors.collectAsStateWithLifecycle()
+    val selectedLanguage by viewModel.selectedLanguage.collectAsStateWithLifecycle()
     val linkedSteamId by viewModel.linkedSteamId.collectAsStateWithLifecycle()
     val searchDialogState by viewModel.searchDialogState.collectAsStateWithLifecycle()
     val steamImportState by viewModel.steamImportState.collectAsStateWithLifecycle()
@@ -266,6 +293,7 @@ fun AuthenticatedTrackerHub(
     val selectedGamePriceState by viewModel.selectedGamePriceState.collectAsStateWithLifecycle()
     val inventoryState by viewModel.inventoryState.collectAsStateWithLifecycle()
     val snackbarMessage by viewModel.snackbarMessage.collectAsStateWithLifecycle()
+    val strings = LocalAppStrings.current
 
     var currentTab by rememberSaveable { mutableStateOf(MainTab.LIBRARY) }
     var showInAppSteamWebLoginDialog by rememberSaveable { mutableStateOf(false) }
@@ -296,6 +324,13 @@ fun AuthenticatedTrackerHub(
             ) {
                 MainTab.entries.forEach { tab ->
                     val selected = currentTab == tab
+                    val localizedTabLabel = when (tab) {
+                        MainTab.LIBRARY -> strings.navLibrary
+                        MainTab.WISHLIST -> strings.navWishlist
+                        MainTab.INVENTORY -> strings.navInventory
+                        MainTab.COMMUNITY -> strings.navRanking
+                        MainTab.SETTINGS -> strings.navSettings
+                    }
                     NavigationBarItem(
                         selected = selected,
                         onClick = {
@@ -310,12 +345,12 @@ fun AuthenticatedTrackerHub(
                         icon = {
                             Icon(
                                 imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
-                                contentDescription = tab.label
+                                contentDescription = localizedTabLabel
                             )
                         },
                         label = {
                             Text(
-                                text = tab.label,
+                                text = localizedTabLabel,
                                 modifier = Modifier.fillMaxWidth(),
                                 textAlign = TextAlign.Center,
                                 style = MaterialTheme.typography.labelSmall,
@@ -345,6 +380,7 @@ fun AuthenticatedTrackerHub(
                         onSyncSteamLibraryNow = { viewModel.syncSteamLibraryAndWishlistAutomatically() },
                         onOpenSteamWebLogin = { showInAppSteamWebLoginDialog = true },
                         onRefreshPricesAndAlerts = { viewModel.refreshAllPricesAndAlerts() },
+                        onCleanupDuplicates = { viewModel.cleanupDuplicateGames() },
                         onNavigateToSettingsSteamImport = { currentTab = MainTab.SETTINGS },
                         onSelectGame = { viewModel.selectGameForDetail(it) },
                         onQuickToggle100Percent = { viewModel.toggle100PercentQuick(it) }
@@ -390,6 +426,9 @@ fun AuthenticatedTrackerHub(
                     CommunityRankingScreen(
                         rankingsState = communityRankingsState,
                         isAdmin = viewModel.isCurrentUserAdmin,
+                        ownedGames = ownedGames,
+                        wishlistGames = wishlistGames,
+                        onAddToWishlist = { viewModel.addRankingGameToWishlist(it) },
                         onDeleteRankingEntry = { viewModel.deleteRankingEntryAsAdmin(it) }
                     )
                 }
@@ -398,6 +437,10 @@ fun AuthenticatedTrackerHub(
                     SettingsScreen(
                         selectedTheme = selectedTheme,
                         onSelectTheme = { viewModel.selectTheme(it) },
+                        customThemeColors = customThemeColors,
+                        onSaveCustomThemeColors = { viewModel.saveCustomThemeColors(it) },
+                        selectedLanguage = selectedLanguage,
+                        onSelectLanguage = { viewModel.selectLanguage(it) },
                         linkedSteamId = linkedSteamId,
                         steamImportState = steamImportState,
                         adminVaultState = adminVaultState,
@@ -408,6 +451,7 @@ fun AuthenticatedTrackerHub(
                             viewModel.saveAdminVaultSecrets(twitchId, twitchSecret, steamKey)
                         },
                         onReloadAdminSecrets = { viewModel.loadAdminVaultSecrets() },
+                        onCleanupDuplicates = { viewModel.cleanupDuplicateGames() },
                         onSignOut = onSignOut
                     )
                 }

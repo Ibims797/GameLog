@@ -50,7 +50,9 @@ class CloudGameRepository(
      */
     fun isCurrentUserAdmin(): Boolean {
         val user = auth.currentUser ?: return false
-        return user.email.equals(AppConfig.ADMIN_EMAIL, ignoreCase = true) && user.isEmailVerified
+        val emailMatches = user.email.equals(AppConfig.ADMIN_EMAIL, ignoreCase = true) ||
+            user.providerData.any { it.email.equals(AppConfig.ADMIN_EMAIL, ignoreCase = true) }
+        return emailMatches && user.isEmailVerified
     }
 
     private fun sanitizeFirestoreId(rawId: String): String {
@@ -390,6 +392,21 @@ class CloudGameRepository(
             val current100Runs = if (existingGlobalSnap.exists()) {
                 existingGlobalSnap.getLong("total100PercentRuns") ?: 0L
             } else 0L
+            val currentStar5 = if (existingGlobalSnap.exists()) {
+                existingGlobalSnap.getLong("star5Count") ?: 0L
+            } else 0L
+            val currentStar4 = if (existingGlobalSnap.exists()) {
+                existingGlobalSnap.getLong("star4Count") ?: 0L
+            } else 0L
+            val currentStar3 = if (existingGlobalSnap.exists()) {
+                existingGlobalSnap.getLong("star3Count") ?: 0L
+            } else 0L
+            val currentStar2 = if (existingGlobalSnap.exists()) {
+                existingGlobalSnap.getLong("star2Count") ?: 0L
+            } else 0L
+            val currentStar1 = if (existingGlobalSnap.exists()) {
+                existingGlobalSnap.getLong("star1Count") ?: 0L
+            } else 0L
 
             val ratingSumDelta = (newRating - oldRating).toLong()
             val ratingCountDelta = when {
@@ -408,10 +425,22 @@ class CloudGameRepository(
                 else -> 0L
             }
 
+            fun starDeltaFor(targetStar: Int): Long {
+                var d = 0L
+                if (oldRating == targetStar) d -= 1L
+                if (newRating == targetStar) d += 1L
+                return d
+            }
+
             val updatedRatingSum = max(0L, currentRatingSum + ratingSumDelta)
             val updatedRatingCount = max(0L, currentRatingCount + ratingCountDelta)
             val updatedRecommendCount = max(0L, currentRecommendCount + recommendDelta)
             val updated100Runs = max(0L, current100Runs + runs100Delta)
+            val updatedStar5 = max(0L, currentStar5 + starDeltaFor(5))
+            val updatedStar4 = max(0L, currentStar4 + starDeltaFor(4))
+            val updatedStar3 = max(0L, currentStar3 + starDeltaFor(3))
+            val updatedStar2 = max(0L, currentStar2 + starDeltaFor(2))
+            val updatedStar1 = max(0L, currentStar1 + starDeltaFor(1))
 
             val rawAverage = if (updatedRatingCount > 0L) {
                 updatedRatingSum.toDouble() / updatedRatingCount.toDouble()
@@ -429,6 +458,11 @@ class CloudGameRepository(
                     "ratingCount" to updatedRatingCount,
                     "recommendCount" to updatedRecommendCount,
                     "total100PercentRuns" to updated100Runs,
+                    "star5Count" to updatedStar5,
+                    "star4Count" to updatedStar4,
+                    "star3Count" to updatedStar3,
+                    "star2Count" to updatedStar2,
+                    "star1Count" to updatedStar1,
                     "lastUpdatedBy" to uid,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
@@ -442,6 +476,11 @@ class CloudGameRepository(
                     "ratingCount" to updatedRatingCount,
                     "recommendCount" to updatedRecommendCount,
                     "total100PercentRuns" to updated100Runs,
+                    "star5Count" to updatedStar5,
+                    "star4Count" to updatedStar4,
+                    "star3Count" to updatedStar3,
+                    "star2Count" to updatedStar2,
+                    "star1Count" to updatedStar1,
                     "isCommunityEntry" to true,
                     "lastUpdatedBy" to uid,
                     "createdAt" to FieldValue.serverTimestamp(),
@@ -460,6 +499,11 @@ class CloudGameRepository(
                     ratingCount = updatedRatingCount,
                     recommendCount = updatedRecommendCount,
                     total100PercentRuns = updated100Runs,
+                    star5Count = updatedStar5,
+                    star4Count = updatedStar4,
+                    star3Count = updatedStar3,
+                    star2Count = updatedStar2,
+                    star1Count = updatedStar1,
                     isCommunityEntry = true,
                     lastUpdatedBy = uid
                 )

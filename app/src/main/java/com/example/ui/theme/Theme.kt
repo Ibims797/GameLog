@@ -1,10 +1,13 @@
 package com.example.ui.theme
 
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import com.example.data.preferences.AppThemeStyle
+import com.example.data.preferences.CustomThemeColors
 
 private val CyberpunkNeonColorScheme = darkColorScheme(
     primary = CyberYellow,
@@ -148,9 +151,84 @@ private val SamuraiSakuraColorScheme = darkColorScheme(
     outline = SamuraiSakuraRose.copy(alpha = 0.45f)
 )
 
+fun parseHexColorSafe(hex: String, fallback: Color): Color {
+    val cleaned = hex.trim().removePrefix("#")
+    if (cleaned.length != 6 && cleaned.length != 8) return fallback
+    return try {
+        val value = cleaned.toLong(16)
+        if (cleaned.length == 6) {
+            Color(0xFF000000L or value)
+        } else {
+            Color(value)
+        }
+    } catch (_: Exception) {
+        fallback
+    }
+}
+
+fun colorToHexString(color: Color): String {
+    val r = (color.red * 255f).toInt().coerceIn(0, 255)
+    val g = (color.green * 255f).toInt().coerceIn(0, 255)
+    val b = (color.blue * 255f).toInt().coerceIn(0, 255)
+    return String.format("#%02X%02X%02X", r, g, b)
+}
+
+private fun buildCustomColorScheme(custom: CustomThemeColors): ColorScheme {
+    val primary = parseHexColorSafe(custom.primaryHex, CyberCyan)
+    val secondary = parseHexColorSafe(custom.secondaryHex, CyberYellow)
+    val background = parseHexColorSafe(custom.backgroundHex, CyberBackground)
+    val surface = parseHexColorSafe(custom.surfaceHex, CyberSurface)
+
+    val onPrimary = if (primary.luminance() > 0.45f) Color(0xFF0B0D13) else Color.White
+    val onSecondary = if (secondary.luminance() > 0.45f) Color(0xFF0B0D13) else Color.White
+    val onBg = if (background.luminance() > 0.55f) Color(0xFF10141D) else Color(0xFFF3F6FC)
+    val onSurf = if (surface.luminance() > 0.55f) Color(0xFF10141D) else Color(0xFFF3F6FC)
+    val onSurfMuted = if (surface.luminance() > 0.55f) Color(0xFF475569) else Color(0xFFA3B1C6)
+
+    val surfaceVariant = Color(
+        red = (surface.red * 0.82f + primary.red * 0.18f).coerceIn(0f, 1f),
+        green = (surface.green * 0.82f + primary.green * 0.18f).coerceIn(0f, 1f),
+        blue = (surface.blue * 0.82f + primary.blue * 0.18f).coerceIn(0f, 1f),
+        alpha = 1f
+    )
+    val primaryContainer = Color(
+        red = (surface.red * 0.65f + primary.red * 0.35f).coerceIn(0f, 1f),
+        green = (surface.green * 0.65f + primary.green * 0.35f).coerceIn(0f, 1f),
+        blue = (surface.blue * 0.65f + primary.blue * 0.35f).coerceIn(0f, 1f),
+        alpha = 1f
+    )
+    val secondaryContainer = Color(
+        red = (surface.red * 0.65f + secondary.red * 0.35f).coerceIn(0f, 1f),
+        green = (surface.green * 0.65f + secondary.green * 0.35f).coerceIn(0f, 1f),
+        blue = (surface.blue * 0.65f + secondary.blue * 0.35f).coerceIn(0f, 1f),
+        alpha = 1f
+    )
+
+    return darkColorScheme(
+        primary = primary,
+        onPrimary = onPrimary,
+        primaryContainer = primaryContainer,
+        onPrimaryContainer = primary,
+        secondary = secondary,
+        onSecondary = onSecondary,
+        secondaryContainer = secondaryContainer,
+        onSecondaryContainer = secondary,
+        tertiary = secondary,
+        onTertiary = onSecondary,
+        background = background,
+        onBackground = onBg,
+        surface = surface,
+        onSurface = onSurf,
+        surfaceVariant = surfaceVariant,
+        onSurfaceVariant = onSurfMuted,
+        outline = primary.copy(alpha = 0.45f)
+    )
+}
+
 @Composable
 fun StoryGamesTheme(
     themeStyle: AppThemeStyle = AppThemeStyle.CYBERPUNK_NEON,
+    customColors: CustomThemeColors = CustomThemeColors(),
     content: @Composable () -> Unit
 ) {
     val colorScheme = when (themeStyle) {
@@ -161,6 +239,7 @@ fun StoryGamesTheme(
         AppThemeStyle.NORDIC_VALHALLA -> NordicValhallaColorScheme
         AppThemeStyle.WASTELAND_PIPTECH -> WastelandPipTechColorScheme
         AppThemeStyle.SAMURAI_SAKURA -> SamuraiSakuraColorScheme
+        AppThemeStyle.CUSTOM_DESIGN -> buildCustomColorScheme(customColors)
     }
 
     MaterialTheme(

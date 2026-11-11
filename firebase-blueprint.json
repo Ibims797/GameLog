@@ -33,6 +33,26 @@
           "type": "integer",
           "description": "Total number of users who completed a 100% run."
         },
+        "star5Count": {
+          "type": "integer",
+          "description": "Anonymous count of 5-star ratings."
+        },
+        "star4Count": {
+          "type": "integer",
+          "description": "Anonymous count of 4-star ratings."
+        },
+        "star3Count": {
+          "type": "integer",
+          "description": "Anonymous count of 3-star ratings."
+        },
+        "star2Count": {
+          "type": "integer",
+          "description": "Anonymous count of 2-star ratings."
+        },
+        "star1Count": {
+          "type": "integer",
+          "description": "Anonymous count of 1-star ratings."
+        },
         "isCommunityEntry": {
           "type": "boolean",
           "description": "Mandatory filter flag (always true) for secure community list queries."

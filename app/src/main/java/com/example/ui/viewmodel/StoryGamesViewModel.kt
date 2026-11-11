@@ -5,7 +5,9 @@ import androidx.lifecycle.viewModelScope
 import com.example.config.AppConfig
 import com.example.data.cloud.GlobalGameStats
 import com.example.data.local.LocalGame
+import com.example.data.preferences.AppLanguage
 import com.example.data.preferences.AppThemeStyle
+import com.example.data.preferences.CustomThemeColors
 import com.example.data.preferences.ThemePreferencesRepository
 import com.example.data.remote.ExternalGameSearchResult
 import com.example.data.remote.SteamAchievement
@@ -137,12 +139,26 @@ class StoryGamesViewModel(
             initialValue = UiState.Loading
         )
 
-    // 3. DataStore Preferences Flows (Dynamisches Theme & Verknüpfte Steam-ID)
+    // 3. DataStore Preferences Flows (Dynamisches Theme, Custom Theme, Sprache & Verknüpfte Steam-ID)
     val selectedTheme: StateFlow<AppThemeStyle> = themePreferences.selectedThemeFlow
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5000L),
             initialValue = AppThemeStyle.CYBERPUNK_NEON
+        )
+
+    val customThemeColors: StateFlow<CustomThemeColors> = themePreferences.customThemeColorsFlow
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000L),
+            initialValue = CustomThemeColors()
+        )
+
+    val selectedLanguage: StateFlow<AppLanguage> = themePreferences.selectedLanguageFlow
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000L),
+            initialValue = AppLanguage.fromSystemLocale()
         )
 
     val linkedSteamId: StateFlow<String> = themePreferences.linkedSteamIdFlow
@@ -182,15 +198,30 @@ class StoryGamesViewModel(
     val snackbarMessage: StateFlow<String?> = _snackbarMessage.asStateFlow()
 
     private var liveUpdaterJob: Job? = null
+    private var backgroundEnrichJob: Job? = null
 
     private var lastAutoSyncedSteamId: String = ""
 
     init {
         viewModelScope.launch {
+            // 0. Beim allerersten App-Start die Systemsprache des Handys einlesen und automatisch setzen
+            themePreferences.initializeSystemLanguageIfUnset()
+
+            // 1. Zuerst lokal gespeicherte Admin-Keys aus DataStore in den RAM (AppConfig) laden,
+            // damit IPlayerService/GetOwnedGames/v1/ sofort beim App-Start & auch im Nur-Steam-Modus den Key hat!
+            themePreferences.restoreCachedApiKeysIntoAppConfig()
+
+            // 2. Automatischer Schutzmechanismus: Bereinigt alte Duplikate & fehlerhafte DLC-Reste
+            repository.cleanupDuplicateGames()
+
             if (repository.isCurrentUserAdmin()) {
+                _adminVaultState.value = _adminVaultState.value.copy(
+                    isAdmin = true,
+                    twitchClientId = AppConfig.TWITCH_CLIENT_ID,
+                    twitchClientSecret = AppConfig.TWITCH_CLIENT_SECRET,
+                    steamApiKey = AppConfig.STEAM_API_KEY
+                )
                 loadAdminVaultSecretsInternal()
-            } else {
-                AppConfig.clearRuntimeAdminKeys()
             }
 
             if (repository.isGoogleSignedIn()) {
@@ -203,6 +234,9 @@ class StoryGamesViewModel(
                         currentUserId.removePrefix("steam_").trim()
                     } else ""
                 }
+
+            // Sofort beim Start für bereits vorhandene Spiele Preise (inkl. Free-to-Play) & 100%-Platin prüfen
+            triggerBackgroundPricesAndAchievementsSync(initialSteamId)
 
             if (initialSteamId.isNotBlank()) {
                 lastAutoSyncedSteamId = initialSteamId
@@ -220,8 +254,31 @@ class StoryGamesViewModel(
                 }
             }
 
-            // Startet den Live-Updater für Wunschliste, Bibliothek & Preisalarme
+            // Startet den Live-Updater für Wunschliste, Bibliothek, Preise & 100%-Runs
             startLiveWishlistAndLibraryUpdater()
+        }
+    }
+
+    /**
+     * Lädt im Hintergrund vollautomatisch für alle Spiele in Bibliothek & Wunschliste:
+     * 1. Aktuelle Steam-Preise inklusive "Free-to-Play"-Status & Preisalarm-Prüfung
+     * 2. Steam-Errungenschaften & automatische "100% Platin"-Erkennung ohne manuelles Anklicken
+     */
+    private fun triggerBackgroundPricesAndAchievementsSync(steamIdInput: String = linkedSteamId.value) {
+        backgroundEnrichJob?.cancel()
+        backgroundEnrichJob = viewModelScope.launch {
+            val priceRes = repository.refreshAllPricesAndCheckAlerts()
+            priceRes.onSuccess { triggered ->
+                if (triggered.isNotEmpty()) {
+                    _snackbarMessage.value = "🔔 PREISALARM ERREICHT: ${triggered.take(2).joinToString(", ")}!"
+                }
+            }
+            val effectiveSteamId = steamIdInput.trim().ifBlank {
+                linkedSteamId.value.trim().ifBlank {
+                    themePreferences.linkedSteamIdFlow.first().trim()
+                }
+            }
+            repository.autoSyncMissingAchievementsAnd100Percent(effectiveSteamId)
         }
     }
 
@@ -256,6 +313,8 @@ class StoryGamesViewModel(
                         _snackbarMessage.value = "✨ Live-Update: '$preview' neu auf deiner Wunschliste erkannt!"
                     }
                 }
+                repository.refreshAllPricesAndCheckAlerts()
+                repository.autoSyncMissingAchievementsAnd100Percent(currentSteamId)
             }
         }
     }
@@ -311,15 +370,29 @@ class StoryGamesViewModel(
         val result = repository.loadAdminVaultSecrets()
         result.fold(
             onSuccess = { secrets ->
+                val resolvedTwitchId = secrets?.twitchClientId?.takeIf { it.isNotBlank() } ?: AppConfig.TWITCH_CLIENT_ID
+                val resolvedTwitchSecret = secrets?.twitchClientSecret?.takeIf { it.isNotBlank() } ?: AppConfig.TWITCH_CLIENT_SECRET
+                val resolvedSteamKey = secrets?.steamApiKey?.takeIf { it.isNotBlank() } ?: AppConfig.STEAM_API_KEY
+
+                if (resolvedTwitchId.isNotBlank() || resolvedTwitchSecret.isNotBlank() || resolvedSteamKey.isNotBlank()) {
+                    themePreferences.cacheRuntimeApiKeysLocally(
+                        twitchClientId = resolvedTwitchId,
+                        twitchClientSecret = resolvedTwitchSecret,
+                        steamApiKey = resolvedSteamKey
+                    )
+                }
+
                 _adminVaultState.value = _adminVaultState.value.copy(
                     isLoading = false,
-                    twitchClientId = secrets?.twitchClientId ?: "",
-                    twitchClientSecret = secrets?.twitchClientSecret ?: "",
-                    steamApiKey = secrets?.steamApiKey ?: "",
-                    statusMessage = if (secrets != null) {
-                        "API-Keys sicher aus dem Cloud-Admin-Tresor geladen (nur im RAM)."
+                    twitchClientId = resolvedTwitchId,
+                    twitchClientSecret = resolvedTwitchSecret,
+                    steamApiKey = resolvedSteamKey,
+                    statusMessage = if (secrets != null && resolvedSteamKey.isNotBlank()) {
+                        "API-Keys geladen! Offizieller IPlayerService/GetOwnedGames/v1/ Endpunkt ist aktiv."
+                    } else if (secrets != null) {
+                        "API-Keys aus dem Cloud-Admin-Tresor geladen."
                     } else {
-                        "Cloud-Tresor ist noch leer. Du kannst deine Keys jetzt sicher speichern."
+                        "Cloud-Tresor ist noch leer. Trage deinen 32-stelligen Steam Web API Key ein und speichere ihn."
                     },
                     isError = false
                 )
@@ -327,8 +400,11 @@ class StoryGamesViewModel(
             onFailure = { err ->
                 _adminVaultState.value = _adminVaultState.value.copy(
                     isLoading = false,
-                    statusMessage = "Zugriff verweigert: ${err.localizedMessage}",
-                    isError = true
+                    twitchClientId = AppConfig.TWITCH_CLIENT_ID,
+                    twitchClientSecret = AppConfig.TWITCH_CLIENT_SECRET,
+                    steamApiKey = AppConfig.STEAM_API_KEY,
+                    statusMessage = "Lokal gecachte Keys aktiv (${err.localizedMessage ?: "Cloud-Tresor Hinweis"})",
+                    isError = false
                 )
             }
         )
@@ -346,6 +422,14 @@ class StoryGamesViewModel(
                 statusMessage = null,
                 isError = false
             )
+            // 1. Sofort lokal in DataStore & AppConfig speichern, damit GetOwnedGames/v1/ den Key unmittelbar nutzt!
+            themePreferences.cacheRuntimeApiKeysLocally(
+                twitchClientId = twitchClientId,
+                twitchClientSecret = twitchClientSecret,
+                steamApiKey = steamApiKey
+            )
+
+            // 2. Zusätzlich im geschützten Firestore Admin-Tresor speichern
             val result = repository.saveAdminVaultSecrets(
                 twitchClientId = twitchClientId,
                 twitchClientSecret = twitchClientSecret,
@@ -358,7 +442,7 @@ class StoryGamesViewModel(
                         twitchClientId = saved.twitchClientId,
                         twitchClientSecret = saved.twitchClientSecret,
                         steamApiKey = saved.steamApiKey,
-                        statusMessage = "API-Keys im geschützten Cloud-Tresor gespeichert (nur für Admin lesbar)!",
+                        statusMessage = "✅ API-Keys gespeichert! Starte sofortigen Abruf über IPlayerService/GetOwnedGames/v1/...",
                         isError = false
                     )
                     val currentSteam = linkedSteamId.value.trim()
@@ -369,9 +453,16 @@ class StoryGamesViewModel(
                 onFailure = { err ->
                     _adminVaultState.value = _adminVaultState.value.copy(
                         isSaving = false,
-                        statusMessage = "Fehler beim Speichern im Tresor: ${err.localizedMessage}",
-                        isError = true
+                        twitchClientId = AppConfig.TWITCH_CLIENT_ID,
+                        twitchClientSecret = AppConfig.TWITCH_CLIENT_SECRET,
+                        steamApiKey = AppConfig.STEAM_API_KEY,
+                        statusMessage = "Key lokal für GetOwnedGames/v1/ aktiviert (Cloud-Sync Hinweis: ${err.localizedMessage})",
+                        isError = false
                     )
+                    val currentSteam = linkedSteamId.value.trim()
+                    if (currentSteam.isNotBlank()) {
+                        syncSteamLibraryAndWishlistAutomatically(currentSteam)
+                    }
                 }
             )
         }
@@ -394,6 +485,25 @@ class StoryGamesViewModel(
                 },
                 onFailure = { err ->
                     _snackbarMessage.value = "Fehler beim Löschen: ${err.localizedMessage ?: "Unbekannt"}"
+                }
+            )
+        }
+    }
+
+    /**
+     * Fügt ein Spiel aus dem Community-Ranking zur Wunschliste hinzu
+     * und synchronisiert es bei aktiver Steam-Sitzung direkt auf Steam.
+     */
+    fun addRankingGameToWishlist(stats: GlobalGameStats) {
+        viewModelScope.launch {
+            _snackbarMessage.value = "Füge '${stats.title}' zur Wunschliste hinzu..."
+            val result = repository.addRankingGameToWishlist(stats)
+            result.fold(
+                onSuccess = { res ->
+                    _snackbarMessage.value = res.statusMessage
+                },
+                onFailure = { err ->
+                    _snackbarMessage.value = err.localizedMessage ?: "Wunschlisten-Fehler aufgetreten."
                 }
             )
         }
@@ -495,20 +605,24 @@ class StoryGamesViewModel(
 
     fun refreshAllPricesAndAlerts() {
         viewModelScope.launch {
-            _snackbarMessage.value = "Prüfe Live-Preise & Preisalarme auf Steam..."
+            _snackbarMessage.value = "Prüfe Live-Preise (inkl. Free-to-Play), 100%-Runs & Preisalarme..."
             val result = repository.refreshAllPricesAndCheckAlerts()
             result.fold(
                 onSuccess = { triggered ->
                     if (triggered.isNotEmpty()) {
                         _snackbarMessage.value = "🔔 Preisalarm erreicht bei: ${triggered.take(3).joinToString(", ")}!"
                     } else {
-                        _snackbarMessage.value = "Alle Steam-Preise & Preisalarme wurden aktualisiert!"
+                        _snackbarMessage.value = "Alle Steam-Preise, Free-to-Play-Badges & Preisalarme wurden aktualisiert!"
                     }
                 },
                 onFailure = { err ->
                     _snackbarMessage.value = "Preis-Update Fehler: ${err.localizedMessage ?: "Unbekannt"}"
                 }
             )
+            val steamId = linkedSteamId.value.trim().ifBlank {
+                themePreferences.linkedSteamIdFlow.first().trim()
+            }
+            repository.autoSyncMissingAchievementsAnd100Percent(steamId)
         }
     }
 
@@ -741,6 +855,22 @@ class StoryGamesViewModel(
         }
     }
 
+    /**
+     * Manueller und automatischer Schutzmechanismus:
+     * Bereinigt Duplikate, führt IGDB- & Steam-Einträge zusammen und entfernt alte DLC-Reste.
+     */
+    fun cleanupDuplicateGames() {
+        viewModelScope.launch {
+            _snackbarMessage.value = "Prüfe und bereinige Duplikate in deiner Bibliothek..."
+            val removed = repository.cleanupDuplicateGames()
+            if (removed > 0) {
+                _snackbarMessage.value = "🛡️ Schutzmechanismus aktiv: $removed Duplikate & DLC-Reste erfolgreich entfernt!"
+            } else {
+                _snackbarMessage.value = "Deine Bibliothek ist optimal bereinigt (0 Duplikate gefunden)."
+            }
+        }
+    }
+
     // --- EXTERNE SUCHE (IGDB / STEAM STORE) ---
 
     fun openSearchDialog(targetOwnedLibrary: Boolean) {
@@ -803,6 +933,7 @@ class StoryGamesViewModel(
             } else {
                 "'${saved.title}' zur Wunschliste hinzugefügt!"
             }
+            triggerBackgroundPricesAndAchievementsSync()
         }
     }
 
@@ -836,11 +967,12 @@ class StoryGamesViewModel(
         if (targetId.isBlank()) return
 
         viewModelScope.launch {
+            themePreferences.restoreCachedApiKeysIntoAppConfig()
             themePreferences.setLinkedSteamId(targetId)
             _steamImportState.value = _steamImportState.value.copy(
                 isImportingLibrary = true,
                 isImportingWishlist = true,
-                statusMessage = "Lade komplette Steam-Bibliothek & Wunschliste...",
+                statusMessage = "Lade komplette Steam-Bibliothek (IPlayerService/GetOwnedGames/v1/) & Wunschliste...",
                 isError = false,
                 hasSteamWebSession = repository.hasActiveSteamWebSession()
             )
@@ -859,7 +991,12 @@ class StoryGamesViewModel(
                     append("$libCount Spiele in Bibliothek")
                     if (wishCount > 0) append(" • $wishCount auf Wunschliste")
                     if (showcaseOnly) {
-                        append(" • ⚠️ Hinweis: Steam verbirgt aktuell deine restlichen Spiele (Nur $libCount öffentliche Profil-Showcase-Spiele sichtbar). Tippe auf 'Steam Web-Login' oder stelle 'Spieldetails' auf Öffentlich!")
+                        val diag = report?.diagnosticInfo?.takeIf { it.isNotBlank() }
+                        if (diag != null) {
+                            append("\n⚠️ $diag")
+                        } else {
+                            append(" • ⚠️ Hinweis: Nur $libCount öffentliche Profil-Showcase-Spiele sichtbar. Prüfe deinen Steam Web API Key im Admin-Tresor und stelle 'Spieldetails' auf Öffentlich!")
+                        }
                     } else if (libResult.isFailure) {
                         append(" (${libResult.exceptionOrNull()?.localizedMessage ?: "Bitte Steam-Privatsphäre prüfen"})")
                     }
@@ -873,6 +1010,7 @@ class StoryGamesViewModel(
                     onlyPublicShowcaseWarning = showcaseOnly,
                     hasSteamWebSession = repository.hasActiveSteamWebSession()
                 )
+                triggerBackgroundPricesAndAchievementsSync(targetId)
             } else {
                 val errMsg = libResult.exceptionOrNull()?.localizedMessage
                     ?: wishResult.exceptionOrNull()?.localizedMessage
@@ -899,10 +1037,11 @@ class StoryGamesViewModel(
         }
 
         viewModelScope.launch {
+            themePreferences.restoreCachedApiKeysIntoAppConfig()
             themePreferences.setLinkedSteamId(targetId)
             _steamImportState.value = _steamImportState.value.copy(
                 isImportingLibrary = true,
-                statusMessage = "Importiere alle Owned Games aus deiner Steam-Bibliothek...",
+                statusMessage = "Rufe IPlayerService/GetOwnedGames/v1/ (include_appinfo=true, include_played_free_games=true) ab...",
                 isError = false,
                 hasSteamWebSession = repository.hasActiveSteamWebSession()
             )
@@ -911,9 +1050,13 @@ class StoryGamesViewModel(
                 onSuccess = { report ->
                     val count = report.games.size
                     val warningText = if (report.onlyPublicShowcaseFound) {
-                        "⚠️ Nur $count Profil-Showcase-Spiele gefunden! Deine restlichen 200+ Spiele sind auf Steam unter 'Privatsphäre -> Spieldetails' versteckt. Nutze den 'Steam Web-Login' Button oben, um alle 250+ Spiele direkt freizuschalten!"
+                        val diag = report.diagnosticInfo.ifBlank {
+                            "Bitte prüfe deinen 32-stelligen Steam Web API Key im Admin-Tresor und stelle auf Steam unter 'Privatsphäre -> Spieldetails' auf Öffentlich."
+                        }
+                        "⚠️ Nur $count Profil-Showcase-Spiele gefunden! $diag"
                     } else {
-                        "Alle $count Spiele erfolgreich in Meine Bibliothek geladen!"
+                        val srcName = if (report.usedWebApi) "IPlayerService/GetOwnedGames/v1/" else "Steam Community Sync"
+                        "✅ Alle $count Spiele erfolgreich über $srcName in Meine Bibliothek geladen!"
                     }
                     _steamImportState.value = _steamImportState.value.copy(
                         isImportingLibrary = false,
@@ -923,10 +1066,11 @@ class StoryGamesViewModel(
                         hasSteamWebSession = repository.hasActiveSteamWebSession()
                     )
                     _snackbarMessage.value = if (report.onlyPublicShowcaseFound) {
-                        "Nur $count Showcase-Spiele öffentlich sichtbar – nutze Steam Web-Login für alle 250+ Spiele!"
+                        "Nur $count Showcase-Spiele gefunden – siehe Diagnose-Hinweis!"
                     } else {
                         "$count Spiele in Meine Bibliothek geladen!"
                     }
+                    triggerBackgroundPricesAndAchievementsSync(targetId)
                 },
                 onFailure = { error ->
                     _steamImportState.value = _steamImportState.value.copy(
@@ -971,6 +1115,7 @@ class StoryGamesViewModel(
                     } else {
                         _snackbarMessage.value = "${summary.totalCount} Spiele auf deiner Wunschliste aktualisiert!"
                     }
+                    triggerBackgroundPricesAndAchievementsSync(targetId)
                 },
                 onFailure = { error ->
                     _steamImportState.value = _steamImportState.value.copy(
@@ -983,11 +1128,24 @@ class StoryGamesViewModel(
         }
     }
 
-    // --- DYNAMISCHES THEMING (DATASTORE) ---
+    // --- DYNAMISCHES THEMING, CUSTOM DESIGN & SPRACHE (DATASTORE) ---
 
     fun selectTheme(style: AppThemeStyle) {
         viewModelScope.launch {
             themePreferences.setThemeStyle(style)
+        }
+    }
+
+    fun saveCustomThemeColors(colors: CustomThemeColors) {
+        viewModelScope.launch {
+            themePreferences.saveCustomThemeColors(colors, activateCustomTheme = true)
+            _snackbarMessage.value = "🎨 Eigenes Design aktiviert und gespeichert!"
+        }
+    }
+
+    fun selectLanguage(language: AppLanguage) {
+        viewModelScope.launch {
+            themePreferences.setAppLanguage(language)
         }
     }
 }

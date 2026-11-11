@@ -13,6 +13,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import okhttp3.FormBody
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -45,18 +46,36 @@ class ExternalGamesRepository {
      * und selbst bei "Spieldetails: Nur Freunde / Privat" alle 250+ Spiele geladen werden!
      */
     private fun buildMergedCookieHeader(requestUrl: String): String {
-        val baseCookies = "birthtime=0; mature_content=1; lastagecheckage=1-0-1990; wants_mature_content=1"
-        return try {
-            val cookieManager = CookieManager.getInstance()
-            val urlCookies = cookieManager.getCookie(requestUrl).orEmpty().trim()
-            val communityCookies = cookieManager.getCookie("https://steamcommunity.com").orEmpty().trim()
-            val storeCookies = cookieManager.getCookie("https://store.steampowered.com").orEmpty().trim()
-            listOf(baseCookies, urlCookies, communityCookies, storeCookies)
-                .filter { it.isNotBlank() }
-                .joinToString("; ")
-        } catch (_: Throwable) {
-            baseCookies
+        val cookieMap = LinkedHashMap<String, String>()
+        cookieMap["birthtime"] = "0"
+        cookieMap["mature_content"] = "1"
+        cookieMap["lastagecheckage"] = "1-0-1990"
+        cookieMap["wants_mature_content"] = "1"
+
+        fun putCookieString(rawCookieStr: String?) {
+            if (rawCookieStr.isNullOrBlank()) return
+            rawCookieStr.split(";").forEach { pair ->
+                val trimmed = pair.trim()
+                val eqIdx = trimmed.indexOf('=')
+                if (eqIdx > 0) {
+                    val key = trimmed.substring(0, eqIdx).trim()
+                    val value = trimmed.substring(eqIdx + 1).trim()
+                    if (key.isNotBlank() && value.isNotBlank()) {
+                        cookieMap[key] = value
+                    }
+                }
+            }
         }
+
+        try {
+            val cookieManager = CookieManager.getInstance()
+            putCookieString(cookieManager.getCookie("https://steamcommunity.com"))
+            putCookieString(cookieManager.getCookie("https://store.steampowered.com"))
+            putCookieString(cookieManager.getCookie(requestUrl))
+        } catch (_: Throwable) {
+        }
+
+        return cookieMap.entries.joinToString("; ") { "${it.key}=${it.value}" }
     }
 
     fun hasActiveSteamWebSession(): Boolean {
@@ -76,16 +95,20 @@ class ExternalGamesRepository {
         .followSslRedirects(true)
         .addInterceptor { chain ->
             val original = chain.request()
-            val mergedCookies = buildMergedCookieHeader(original.url.toString())
-            val req = original.newBuilder()
+            val host = original.url.host.lowercase(Locale.ROOT)
+            val reqBuilder = original.newBuilder()
                 .header(
                     "User-Agent",
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
                 )
                 .header("Accept-Language", "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7")
-                .header("Cookie", mergedCookies)
-                .build()
-            chain.proceed(req)
+
+            // Sende Steam-Cookies nur an Steam-Community / Steam-Store (nicht an api.steampowered.com)
+            if (host.contains("steamcommunity.com") || host.contains("steampowered.com") && !host.startsWith("api.")) {
+                val mergedCookies = buildMergedCookieHeader(original.url.toString())
+                reqBuilder.header("Cookie", mergedCookies)
+            }
+            chain.proceed(reqBuilder.build())
         }
         .build()
 
@@ -171,19 +194,20 @@ class ExternalGamesRepository {
         }
     }
 
-    private fun httpGetString(url: String): String? {
+    private fun httpGetWithStatus(url: String): Pair<Int, String?> {
         return try {
             val request = Request.Builder().url(url).get().build()
             okHttpClient.newCall(request).execute().use { response ->
-                if (response.isSuccessful) {
-                    response.body?.string()
-                } else {
-                    null
-                }
+                response.code to response.body?.string()
             }
         } catch (_: Exception) {
-            null
+            -1 to null
         }
+    }
+
+    private fun httpGetString(url: String): String? {
+        val (code, body) = httpGetWithStatus(url)
+        return if (code in 200..299) body else null
     }
 
     /**
@@ -357,6 +381,7 @@ class ExternalGamesRepository {
         val combinedByAppId = LinkedHashMap<Long, LocalGame>()
         var countFromWebApi = 0
         var countFromHtmlOrDynamicStore = 0
+        var apiDiagnostic = ""
 
         fun mergeGameEntry(game: LocalGame) {
             val appId = game.id.removePrefix("steam_").toLongOrNull() ?: return
@@ -379,14 +404,53 @@ class ExternalGamesRepository {
             }
         }
 
-        // Quelle 1: Offizielle Steam Web API (`IPlayerService/GetOwnedGames/v1/` mit `input_json` + `/v0001/`)
-        val steamKey = AppConfig.STEAM_API_KEY
-        if (steamKey.isNotBlank()) {
+        // Quelle 1: Offizielle Steam Web API (`IPlayerService/GetOwnedGames/v1/`)
+        // Unterstützt exakt die direkten Query-Parameter:
+        // ?key=API_KEY&steamid=STEAM_ID&include_appinfo=true&include_played_free_games=true&format=json
+        val rawSteamKey = AppConfig.STEAM_API_KEY.trim()
+        val cleanSteamKey = Regex("([0-9A-Fa-f]{32})").find(rawSteamKey)?.groupValues?.getOrNull(1)
+            ?: rawSteamKey
+
+        if (cleanSteamKey.isNotBlank()) {
+            // 1A: Exakter GET-Request wie in der offiziellen Steam Web API Dokumentation (Query-Parameter)
+            try {
+                val directV1Url = "${AppConfig.STEAM_API_BASE_URL}IPlayerService/GetOwnedGames/v1/" +
+                    "?key=$cleanSteamKey&steamid=$steamId64&include_appinfo=true&include_played_free_games=true&include_free_sub=true&skip_unvetted_apps=false&format=json"
+                val (statusCode, body) = httpGetWithStatus(directV1Url)
+                if (statusCode in 200..299 && !body.isNullOrBlank()) {
+                    val parsed = parseOwnedGamesApiJson(body, knownTitles)
+                    countFromWebApi += parsed.size
+                    parsed.forEach(::mergeGameEntry)
+                    if (parsed.isEmpty()) {
+                        apiDiagnostic = "GetOwnedGames/v1/ antwortete mit HTTP 200, aber 'games' war leer (Steam-Privatsphäre 'Spieldetails' steht auf 'Nur Freunde/Privat')."
+                    }
+                } else if (statusCode == 403 || statusCode == 401) {
+                    apiDiagnostic = "Steam Web API Key wurde abgelehnt (HTTP $statusCode). Bitte prüfe den 32-stelligen Key im Admin-Tresor."
+                }
+            } catch (_: Exception) {
+            }
+
+            // 1B: Klassischer GET-Request ohne Zusatzflags (`include_appinfo=true&include_played_free_games=true&format=json`)
+            if (countFromWebApi == 0) {
+                try {
+                    val standardV1Url = "${AppConfig.STEAM_API_BASE_URL}IPlayerService/GetOwnedGames/v1/" +
+                        "?key=$cleanSteamKey&steamid=$steamId64&include_appinfo=true&include_played_free_games=true&format=json"
+                    val (statusCode, body) = httpGetWithStatus(standardV1Url)
+                    if (statusCode in 200..299 && !body.isNullOrBlank()) {
+                        val parsed = parseOwnedGamesApiJson(body, knownTitles)
+                        countFromWebApi += parsed.size
+                        parsed.forEach(::mergeGameEntry)
+                    }
+                } catch (_: Exception) {
+                }
+            }
+
+            // 1C: `IPlayerService/GetOwnedGames/v1/` mit `input_json`
             try {
                 val inputJson = """{"steamid":"$steamId64","include_appinfo":true,"include_played_free_games":true,"include_free_sub":true,"skip_unvetted_apps":false}"""
                 val encodedJson = URLEncoder.encode(inputJson, "UTF-8")
-                val v1Url = "${AppConfig.STEAM_API_BASE_URL}IPlayerService/GetOwnedGames/v1/?key=$steamKey&input_json=$encodedJson&format=json"
-                val v1Body = httpGetString(v1Url)
+                val v1JsonUrl = "${AppConfig.STEAM_API_BASE_URL}IPlayerService/GetOwnedGames/v1/?key=$cleanSteamKey&input_json=$encodedJson&format=json"
+                val v1Body = httpGetString(v1JsonUrl)
                 if (!v1Body.isNullOrBlank()) {
                     val parsed = parseOwnedGamesApiJson(v1Body, knownTitles)
                     countFromWebApi += parsed.size
@@ -395,8 +459,9 @@ class ExternalGamesRepository {
             } catch (_: Exception) {
             }
 
+            // 1D: `IPlayerService/GetOwnedGames/v0001/`
             try {
-                val v0001Url = "${AppConfig.STEAM_API_BASE_URL}IPlayerService/GetOwnedGames/v0001/?key=$steamKey&steamid=$steamId64&include_appinfo=1&include_played_free_games=1&format=json"
+                val v0001Url = "${AppConfig.STEAM_API_BASE_URL}IPlayerService/GetOwnedGames/v0001/?key=$cleanSteamKey&steamid=$steamId64&include_appinfo=1&include_played_free_games=1&format=json"
                 val v0001Body = httpGetString(v0001Url)
                 if (!v0001Body.isNullOrBlank()) {
                     val parsed = parseOwnedGamesApiJson(v0001Body, knownTitles)
@@ -405,19 +470,30 @@ class ExternalGamesRepository {
                 }
             } catch (_: Exception) {
             }
+        } else {
+            apiDiagnostic = "Kein Steam Web API-Key aktiv (bitte im Admin-Tresor speichern oder Steam Web-Login nutzen)."
         }
 
-        // Quelle 2: Vollständige Steam Community HTML/JSON `data-profile-gameslist` (nutzt aktive WebView-Cookies falls eingeloggt!)
+        // Quelle 2: Vollständige Steam Community HTML/JSON `data-profile-gameslist` + WebAPI `access_token` (nutzt aktive WebView-Cookies falls eingeloggt!)
         val htmlGames = parseSteamCommunityHtmlGamesList(steamId64, rawSteamIdInput, knownTitles)
         countFromHtmlOrDynamicStore += htmlGames.size
         htmlGames.forEach(::mergeGameEntry)
 
         // Quelle 3: Steam Dynamic Store Userdata (`https://store.steampowered.com/dynamicstore/userdata/`)
-        // Wenn der Nutzer über den Steam-Web-Login angemeldet ist, liefert dieser Endpunkt `rgOwnedApps` mit ALLEN 250+ AppIDs!
+        // Wenn der Nutzer über den Steam-Web-Login angemeldet ist, liefert dieser Endpunkt `rgOwnedApps`.
+        // WICHTIG: `rgOwnedApps` enthält neben echten Spielen auch Hunderte DLCs, Soundtracks und Tools.
+        // Es darf daher NIEMALS geladen werden, wenn die offizielle Web-API oder das WebAPI-Token bereits
+        // die echten Spielebibliothek-Titel (z.B. 250 Spiele) geliefert hat!
         if (hasActiveSteamWebSession()) {
-            val dynamicOwnedGames = fetchDynamicStoreOwnedGames(knownTitles)
-            countFromHtmlOrDynamicStore += dynamicOwnedGames.size
-            dynamicOwnedGames.forEach(::mergeGameEntry)
+            val tokenGames = fetchOwnedGamesViaWebApiToken(steamId64, knownTitles)
+            countFromHtmlOrDynamicStore += tokenGames.size
+            tokenGames.forEach(::mergeGameEntry)
+
+            if (combinedByAppId.isEmpty()) {
+                val dynamicOwnedGames = fetchDynamicStoreOwnedGames(knownTitles)
+                countFromHtmlOrDynamicStore += dynamicOwnedGames.size
+                dynamicOwnedGames.forEach(::mergeGameEntry)
+            }
         }
 
         // Quelle 4: Öffentlicher Steam Community XML Games-Feed (`/games/?tab=all&xml=1` + Profil-Vorschau)
@@ -454,6 +530,30 @@ class ExternalGamesRepository {
         }
 
         if (combinedByAppId.isNotEmpty()) {
+            // Lade direkt beim Import alle Live-Preise & Free-to-Play-Status gebündelt nach
+            val missingPriceAppIds = combinedByAppId.entries
+                .filter { it.key > 0L && (it.value.formattedPrice.isBlank() || it.value.currentPriceCents < 0) }
+                .map { it.key }
+
+            if (missingPriceAppIds.isNotEmpty()) {
+                val bulkPrices = fetchBulkSteamPrices(missingPriceAppIds)
+                bulkPrices.forEach { (appId, priceInfo) ->
+                    val current = combinedByAppId[appId]
+                    if (current != null) {
+                        val isTriggered = current.targetPriceAlertEur > 0.0 &&
+                            priceInfo.currentPriceCents >= 0 &&
+                            (priceInfo.currentPriceCents / 100.0) <= current.targetPriceAlertEur
+                        combinedByAppId[appId] = current.copy(
+                            currentPriceCents = priceInfo.currentPriceCents,
+                            originalPriceCents = priceInfo.originalPriceCents,
+                            discountPercent = priceInfo.discountPercent,
+                            formattedPrice = priceInfo.formattedCurrentPrice,
+                            isPriceAlertTriggered = isTriggered
+                        )
+                    }
+                }
+            }
+
             val sortedList = combinedByAppId.values.sortedWith(
                 compareByDescending<LocalGame> { it.playtimeHours }
                     .thenBy { it.title.lowercase(Locale.ROOT) }
@@ -464,14 +564,15 @@ class ExternalGamesRepository {
                     games = sortedList,
                     usedWebApi = countFromWebApi > 0,
                     usedAuthenticatedSession = hasActiveSteamWebSession() && countFromHtmlOrDynamicStore > 0,
-                    onlyPublicShowcaseFound = onlyShowcase
+                    onlyPublicShowcaseFound = onlyShowcase,
+                    diagnosticInfo = apiDiagnostic
                 )
             )
         }
 
         Result.failure(
             IllegalStateException(
-                "Spielebibliothek konnte nicht gelesen werden. Bitte nutze den Button 'Steam Web-Login (Alle 250+ Spiele freischalten)' oder stelle in deinen Steam-Datenschutzeinstellungen 'Spieldetails' auf 'Öffentlich'."
+                "Spielebibliothek konnte nicht gelesen werden. $apiDiagnostic"
             )
         )
     }
@@ -481,6 +582,39 @@ class ExternalGamesRepository {
         knownTitles: Map<Long, String> = emptyMap()
     ): Result<List<LocalGame>> {
         return importSteamOwnedGamesWithReport(rawSteamIdInput, knownTitles).map { it.games }
+    }
+
+    /**
+     * Extrahiert bei aktiver Steam-WebView-Session das `webapi_token` (`data-loyalty-webapi-token`)
+     * und ruft damit direkt `IPlayerService/GetOwnedGames/v1/?access_token=...` auf.
+     * Dadurch werden selbst bei privaten Spieldetails und ohne API-Key alle 250+ Spiele mit Namen & Spielzeit geladen!
+     */
+    private fun fetchOwnedGamesViaWebApiToken(
+        steamId64: String,
+        knownTitles: Map<Long, String>
+    ): List<LocalGame> {
+        val candidatePages = listOf(
+            "https://steamcommunity.com/my/games/?tab=all",
+            "https://steamcommunity.com/profiles/$steamId64/games/?tab=all",
+            "https://store.steampowered.com/pointsshop"
+        )
+        for (pageUrl in candidatePages) {
+            val html = httpGetString(pageUrl) ?: continue
+            val unescaped = unescapeHtmlAttributeJson(html)
+            val tokenMatch = Regex("""data-loyalty-webapi-token\s*=\s*"?\\?"?([A-Za-z0-9_\-\.]{20,})""").find(unescaped)
+                ?: Regex(""""webapi_token"\s*:\s*"([A-Za-z0-9_\-\.]{20,})"""").find(unescaped)
+            val accessToken = tokenMatch?.groupValues?.getOrNull(1)?.trim().orEmpty()
+            if (accessToken.isNotBlank()) {
+                val url = "${AppConfig.STEAM_API_BASE_URL}IPlayerService/GetOwnedGames/v1/" +
+                    "?access_token=$accessToken&steamid=$steamId64&include_appinfo=true&include_played_free_games=true&include_free_sub=true&skip_unvetted_apps=false&format=json"
+                val body = httpGetString(url)
+                if (!body.isNullOrBlank()) {
+                    val games = parseOwnedGamesApiJson(body, knownTitles)
+                    if (games.isNotEmpty()) return games
+                }
+            }
+        }
+        return emptyList()
     }
 
     private fun fetchDynamicStoreOwnedGames(knownTitles: Map<Long, String>): List<LocalGame> {
@@ -567,11 +701,12 @@ class ExternalGamesRepository {
             .takeIf { it.isNotBlank() && !it.matches(Regex("^\\d{17}$")) }
 
         val urls = buildList {
-            add("https://steamcommunity.com/profiles/$steamId64/games/?tab=all&l=german")
-            add("https://steamcommunity.com/profiles/$steamId64/games/?tab=all")
             if (hasActiveSteamWebSession()) {
                 add("https://steamcommunity.com/my/games/?tab=all&l=german")
+                add("https://steamcommunity.com/my/games/?tab=all")
             }
+            add("https://steamcommunity.com/profiles/$steamId64/games/?tab=all&l=german")
+            add("https://steamcommunity.com/profiles/$steamId64/games/?tab=all")
             if (cleanedVanity != null) {
                 add("https://steamcommunity.com/id/$cleanedVanity/games/?tab=all&l=german")
                 add("https://steamcommunity.com/id/$cleanedVanity/games/?tab=all")
@@ -582,6 +717,24 @@ class ExternalGamesRepository {
 
         for (url in urls) {
             val html = httpGetString(url) ?: continue
+
+            // Falls die HTML-Seite ein `webapi_token` enthält, nutze es direkt für `GetOwnedGames/v1/`!
+            val unescapedHtml = unescapeHtmlAttributeJson(html)
+            val tokenMatch = Regex("""data-loyalty-webapi-token\s*=\s*"?\\?"?([A-Za-z0-9_\-\.]{20,})""").find(unescapedHtml)
+                ?: Regex(""""webapi_token"\s*:\s*"([A-Za-z0-9_\-\.]{20,})"""").find(unescapedHtml)
+            val webApiToken = tokenMatch?.groupValues?.getOrNull(1)?.trim().orEmpty()
+            if (webApiToken.isNotBlank()) {
+                val tokenUrl = "${AppConfig.STEAM_API_BASE_URL}IPlayerService/GetOwnedGames/v1/" +
+                    "?access_token=$webApiToken&steamid=$steamId64&include_appinfo=true&include_played_free_games=true&include_free_sub=true&skip_unvetted_apps=false&format=json"
+                val tokenBody = httpGetString(tokenUrl)
+                if (!tokenBody.isNullOrBlank()) {
+                    parseOwnedGamesApiJson(tokenBody, knownTitles).forEach { game ->
+                        val appId = game.id.removePrefix("steam_").toLongOrNull()
+                        if (appId != null) result[appId] = game
+                    }
+                }
+            }
+
             val jsonCandidate = extractGamesListJsonFromHtml(html)
             if (!jsonCandidate.isNullOrBlank()) {
                 try {
@@ -595,7 +748,7 @@ class ExternalGamesRepository {
                     }
                 } catch (_: Exception) {
                     try {
-                        val rgStart = jsonCandidate.indexOf("\"rgGames\":")
+                        val rgStart = jsonCandidate.indexOf("\"rgGames\"")
                         if (rgStart >= 0) {
                             val arrStart = jsonCandidate.indexOf('[', rgStart)
                             if (arrStart >= 0) {
@@ -713,6 +866,20 @@ class ExternalGamesRepository {
                 }
             }
         }
+
+        // Fallback für React SSR / eingebettetes JSON (`&quot;rgGames&quot;:[...]` oder `"rgGames":[...]`)
+        val unescaped = unescapeHtmlAttributeJson(html).replace("\\\"", "\"")
+        val rgIdx = unescaped.indexOf("\"rgGames\"")
+        if (rgIdx >= 0) {
+            val arrStart = unescaped.indexOf('[', rgIdx)
+            if (arrStart >= 0) {
+                val arrStr = extractBalancedJsonArray(unescaped, arrStart)
+                if (!arrStr.isNullOrBlank()) {
+                    return """{"rgGames":$arrStr}"""
+                }
+            }
+        }
+
         return null
     }
 
@@ -989,14 +1156,20 @@ class ExternalGamesRepository {
                 for (appId in chunk) {
                     val appObj = root.optJSONObject(appId.toString()) ?: continue
                     if (!appObj.optBoolean("success", false)) continue
-                    val dataObj = appObj.optJSONObject("data") ?: continue
-                    val priceObj = dataObj.optJSONObject("price_overview")
+                    val dataObj = appObj.optJSONObject("data")
+                    val priceObj = dataObj?.optJSONObject("price_overview")
                     if (priceObj != null) {
                         val finalCents = priceObj.optInt("final", -1)
                         val initialCents = priceObj.optInt("initial", finalCents)
                         val discount = priceObj.optInt("discount_percent", 0)
                         val formattedFinal = priceObj.optString("final_formatted", "").ifBlank {
-                            if (finalCents >= 0) String.format(Locale.GERMANY, "%.2f €", finalCents / 100.0) else ""
+                            if (finalCents == 0) {
+                                "Free-to-Play"
+                            } else if (finalCents > 0) {
+                                String.format(Locale.GERMANY, "%.2f €", finalCents / 100.0)
+                            } else {
+                                ""
+                            }
                         }
                         val formattedInitial = priceObj.optString("initial_formatted", "").ifBlank {
                             if (initialCents > 0) String.format(Locale.GERMANY, "%.2f €", initialCents / 100.0) else ""
@@ -1011,6 +1184,17 @@ class ExternalGamesRepository {
                                 formattedOriginalPrice = formattedInitial
                             )
                         }
+                    } else {
+                        // Bei Free-to-Play Spielen auf Steam liefert `filters=price_overview`
+                        // `success: true`, aber ein leeres `data`-Feld ohne `price_overview`.
+                        result[appId] = SteamPriceOverviewInfo(
+                            steamAppId = appId,
+                            currentPriceCents = 0,
+                            originalPriceCents = 0,
+                            discountPercent = 0,
+                            formattedCurrentPrice = "Free-to-Play",
+                            formattedOriginalPrice = "0,00 €"
+                        )
                     }
                 }
             } catch (_: Exception) {
@@ -1381,14 +1565,100 @@ class ExternalGamesRepository {
     }
 
     suspend fun resolveSteamAppIdForGame(game: LocalGame): Long? {
-        if (game.id.startsWith("steam_")) {
-            val parsed = game.id.removePrefix("steam_").trim().toLongOrNull()
+        return resolveSteamAppId(game.id, game.title)
+    }
+
+    suspend fun resolveSteamAppId(gameId: String, title: String): Long? {
+        if (gameId.startsWith("steam_")) {
+            val parsed = gameId.removePrefix("steam_").trim().toLongOrNull()
             if (parsed != null && parsed > 0L) return parsed
         }
         return try {
-            val search = steamStoreService.searchStoreGames(query = game.title)
+            val search = steamStoreService.searchStoreGames(query = title)
             search.items?.firstOrNull()?.id?.takeIf { it > 0L }
         } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Fügt ein Spiel über die aktive Steam Store Websitzung (`store.steampowered.com/api/addtowishlist`)
+     * direkt zur Steam-Wunschliste des Nutzers auf den offiziellen Steam-Servern hinzu.
+     */
+    suspend fun addGameToSteamStoreWishlist(appId: Long): SteamWishlistAddResult = withContext(Dispatchers.IO) {
+        if (appId <= 0L) {
+            return@withContext SteamWishlistAddResult(
+                successOnSteam = false,
+                appId = appId,
+                message = "Ungültige Steam App-ID."
+            )
+        }
+
+        try {
+            var sessionId = extractSessionIdFromCookies()
+            if (sessionId.isNullOrBlank()) {
+                sessionId = java.util.UUID.randomUUID().toString().replace("-", "").take(24)
+                try {
+                    CookieManager.getInstance().setCookie(
+                        "https://store.steampowered.com",
+                        "sessionid=$sessionId; Path=/; Domain=.steampowered.com; Secure"
+                    )
+                } catch (_: Throwable) {
+                }
+            }
+
+            val formBody = FormBody.Builder()
+                .add("sessionid", sessionId)
+                .add("appid", appId.toString())
+                .build()
+
+            val request = Request.Builder()
+                .url("https://store.steampowered.com/api/addtowishlist")
+                .post(formBody)
+                .header("Origin", "https://store.steampowered.com")
+                .header("Referer", "https://store.steampowered.com/app/$appId/")
+                .header("X-Requested-With", "XMLHttpRequest")
+                .build()
+
+            okHttpClient.newCall(request).execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                val isSuccess = response.isSuccessful && (body.contains("\"success\":true") || body.contains("\"success\":1"))
+
+                if (isSuccess) {
+                    SteamWishlistAddResult(
+                        successOnSteam = true,
+                        appId = appId,
+                        message = "Direkt auf deinem Steam-Account zur Wunschliste hinzugefügt!"
+                    )
+                } else if (hasActiveSteamWebSession()) {
+                    SteamWishlistAddResult(
+                        successOnSteam = false,
+                        appId = appId,
+                        message = "In App-Wunschliste gespeichert (Steam Store Session erfordert Bestätigung)"
+                    )
+                } else {
+                    SteamWishlistAddResult(
+                        successOnSteam = false,
+                        appId = appId,
+                        message = "In App-Wunschliste gespeichert. (Tippe auf 'Steam Login' für 1-Klick Direktspeicherung auf Steam)"
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            SteamWishlistAddResult(
+                successOnSteam = false,
+                appId = appId,
+                message = "In App-Wunschliste gespeichert (${e.localizedMessage ?: "Netzwerk"})"
+            )
+        }
+    }
+
+    private fun extractSessionIdFromCookies(): String? {
+        return try {
+            val cookies = CookieManager.getInstance().getCookie("https://store.steampowered.com").orEmpty() +
+                ";" + CookieManager.getInstance().getCookie("https://steamcommunity.com").orEmpty()
+            Regex("sessionid=([a-zA-Z0-9_-]+)").find(cookies)?.groupValues?.getOrNull(1)
+        } catch (_: Throwable) {
             null
         }
     }

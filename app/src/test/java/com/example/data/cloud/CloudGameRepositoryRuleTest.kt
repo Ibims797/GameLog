@@ -37,11 +37,13 @@ class CloudGameRepositoryRuleTest : FirestoreEmulatorTestBase() {
         assertEquals(5.0, stats.averageRating, 0.01)
         assertEquals(1L, stats.recommendCount)
         assertEquals(1L, stats.total100PercentRuns)
+        assertEquals(1L, stats.star5Count)
+        assertEquals(0L, stats.star4Count)
 
         val rankings = withTimeout(FLOW_TIMEOUT_MS) {
             repository.observeCommunityRankings().first { list -> list.any { it.id == uniqueGameId } }
         }
-        assertTrue(rankings.any { it.id == uniqueGameId && it.total100PercentRuns == 1L })
+        assertTrue(rankings.any { it.id == uniqueGameId && it.total100PercentRuns == 1L && it.star5Count == 1L })
     }
 
     @Test

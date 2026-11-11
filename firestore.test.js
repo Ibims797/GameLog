@@ -124,7 +124,7 @@ test("Verified Admin CAN create, read, and update admin_vault API keys", async (
   );
 });
 
-test("Authenticated user can create, update, and query global_game_stats with matching filter", async () => {
+test("Authenticated user can create, update, and query global_game_stats with matching filter and anonymous star counts", async () => {
   const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
   const now = new Date();
   const statsRef = aliceDb.collection("global_game_stats").doc("igdb_1942");
@@ -138,6 +138,11 @@ test("Authenticated user can create, update, and query global_game_stats with ma
       ratingCount: 1,
       recommendCount: 1,
       total100PercentRuns: 1,
+      star5Count: 1,
+      star4Count: 0,
+      star3Count: 0,
+      star2Count: 0,
+      star1Count: 0,
       isCommunityEntry: true,
       lastUpdatedBy: ALICE_UID,
       createdAt: now,

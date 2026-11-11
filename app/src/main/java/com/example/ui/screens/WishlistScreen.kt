@@ -18,9 +18,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.BookmarkAdded
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Sell
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.Button
@@ -33,6 +35,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -40,6 +44,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -50,13 +55,15 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.example.data.local.LocalGame
 import com.example.ui.components.GameListCard
+import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.theme.PlatinumGlowPrimary
 import com.example.ui.viewmodel.SteamImportState
+import java.util.Locale
 
 /**
  * Tab 2: "Wunschliste" (`isOwned == false`).
  * Zeigt vorgemerkte Spiele aus der IGDB/Steam-Suche oder dem Steam-Wishlist-Import
- * inklusive automatischem Live-Updater, Live-SteamDB-Preisen und Preisalarm-Filter.
+ * inklusive Echtzeit-Suche, automatischem Live-Updater, Live-SteamDB-Preisen und Preisalarm-Filter.
  */
 @Composable
 fun WishlistScreen(
@@ -72,16 +79,29 @@ fun WishlistScreen(
     onQuickToggle100Percent: (LocalGame) -> Unit,
     onMoveToOwnedLibrary: (LocalGame) -> Unit
 ) {
+    val strings = LocalAppStrings.current
     var filterOnlyAlerts by remember { mutableStateOf(false) }
+    var searchQuery by rememberSaveable { mutableStateOf("") }
 
     val activeAlertsCount = wishlistGames.count { it.targetPriceAlertEur > 0.0 }
     val triggeredAlertsCount = wishlistGames.count { it.isPriceAlertTriggered }
 
-    val displayedGames = remember(wishlistGames, filterOnlyAlerts) {
-        if (filterOnlyAlerts) {
+    val displayedGames = remember(wishlistGames, filterOnlyAlerts, searchQuery) {
+        val byAlert = if (filterOnlyAlerts) {
             wishlistGames.filter { it.targetPriceAlertEur > 0.0 || it.isPriceAlertTriggered }
         } else {
             wishlistGames
+        }
+        val trimmed = searchQuery.trim()
+        if (trimmed.isBlank()) {
+            byAlert
+        } else {
+            val q = trimmed.lowercase(Locale.ROOT)
+            byAlert.filter { game ->
+                game.title.lowercase(Locale.ROOT).contains(q) ||
+                    game.genres.lowercase(Locale.ROOT).contains(q) ||
+                    game.personalNote.lowercase(Locale.ROOT).contains(q)
+            }
         }
     }
 
@@ -114,7 +134,7 @@ fun WishlistScreen(
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "MEINE WUNSCHLISTE",
+                                    text = strings.wishlistTitle,
                                     style = MaterialTheme.typography.headlineMedium,
                                     color = MaterialTheme.colorScheme.secondary
                                 )
@@ -160,6 +180,51 @@ fun WishlistScreen(
                             }
                         }
 
+                        // Echtzeit-Suchleiste für die Wunschliste
+                        if (wishlistGames.isNotEmpty() || searchQuery.isNotBlank()) {
+                            OutlinedTextField(
+                                value = searchQuery,
+                                onValueChange = { searchQuery = it },
+                                placeholder = {
+                                    Text(
+                                        text = strings.wishlistSearchPlaceholder,
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.Search,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.secondary
+                                    )
+                                },
+                                trailingIcon = {
+                                    if (searchQuery.isNotBlank()) {
+                                        IconButton(
+                                            onClick = { searchQuery = "" },
+                                            modifier = Modifier.testTag("wishlist_clear_search_button")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Clear,
+                                                contentDescription = "Suche löschen"
+                                            )
+                                        }
+                                    }
+                                },
+                                singleLine = true,
+                                shape = RoundedCornerShape(14.dp),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                                    focusedBorderColor = MaterialTheme.colorScheme.secondary,
+                                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("wishlist_search_input")
+                            )
+                        }
+
                         // Filterleiste für Preisalarme
                         if (wishlistGames.isNotEmpty()) {
                             Row(
@@ -170,7 +235,7 @@ fun WishlistScreen(
                                 FilterChip(
                                     selected = !filterOnlyAlerts,
                                     onClick = { filterOnlyAlerts = false },
-                                    label = { Text("Alle (${wishlistGames.size})") }
+                                    label = { Text("${strings.filterAll} (${wishlistGames.size})") }
                                 )
                                 FilterChip(
                                     selected = filterOnlyAlerts,
@@ -186,9 +251,9 @@ fun WishlistScreen(
                                     label = {
                                         Text(
                                             if (triggeredAlertsCount > 0) {
-                                                "🔔 Preisalarme ($triggeredAlertsCount erreicht / $activeAlertsCount aktiv)"
+                                                "🔔 ${strings.filterPriceAlerts} ($triggeredAlertsCount erreicht / $activeAlertsCount aktiv)"
                                             } else {
-                                                "🔔 Preisalarme ($activeAlertsCount)"
+                                                "🔔 ${strings.filterPriceAlerts} ($activeAlertsCount)"
                                             }
                                         )
                                     }
@@ -284,25 +349,36 @@ fun WishlistScreen(
                                 modifier = Modifier.size(48.dp)
                             )
                             Text(
-                                text = if (filterOnlyAlerts) {
-                                    "Noch keine Preisalarme auf der Wunschliste"
-                                } else {
-                                    "Deine Wunschliste ist leer"
+                                text = when {
+                                    searchQuery.isNotBlank() -> strings.noGamesForSearchOrFilter
+                                    filterOnlyAlerts -> "Noch keine Preisalarme auf der Wunschliste"
+                                    else -> "Deine Wunschliste ist leer"
                                 },
                                 style = MaterialTheme.typography.titleLarge,
                                 color = MaterialTheme.colorScheme.onSurface,
                                 textAlign = TextAlign.Center
                             )
                             Text(
-                                text = if (filterOnlyAlerts) {
-                                    "Tippe auf ein beliebiges Spiel und wähle unter 'SteamDB & Preisalarm Tracker' z.B. 'Alarm auf aktuellen Preis setzen'."
-                                } else {
-                                    "Füge kommende Story-Highlights über die IGDB/Steam-Suche hinzu oder verknüpfe deine Steam-ID für den automatischen Live-Updater."
+                                text = when {
+                                    searchQuery.isNotBlank() -> "Keine Treffer für \"$searchQuery\" in deiner Wunschliste."
+                                    filterOnlyAlerts -> "Tippe auf ein beliebiges Spiel und wähle unter 'SteamDB & Preisalarm Tracker' z.B. 'Alarm auf aktuellen Preis setzen'."
+                                    else -> "Füge kommende Story-Highlights über die IGDB/Steam-Suche hinzu oder verknüpfe deine Steam-ID für den automatischen Live-Updater."
                                 },
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 textAlign = TextAlign.Center
                             )
+                            if (searchQuery.isNotBlank() || filterOnlyAlerts) {
+                                OutlinedButton(
+                                    onClick = {
+                                        searchQuery = ""
+                                        filterOnlyAlerts = false
+                                    },
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Text(strings.resetSearchAndFilter)
+                                }
+                            }
                             Spacer(modifier = Modifier.height(4.dp))
                             Row(
                                 modifier = Modifier.fillMaxWidth(),

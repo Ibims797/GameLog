@@ -1,6 +1,7 @@
 package com.example.data.preferences
 
 import android.content.Context
+import android.content.res.Resources
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
@@ -8,21 +9,103 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.config.AppConfig
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import java.util.Locale
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(
     name = AppConfig.DATASTORE_PREFERENCES_NAME
 )
 
 /**
- * Die 7 wählbaren Story-Gaming-Designs (gespeichert via DataStore Preferences):
- * 1. "Cyberpunk Neon" (Gelb / Cyan / Magenta)
- * 2. "Dark Fantasy" (Dunkelgrau / Blutrot / Runen-Gold)
- * 3. "Sci-Fi Space" (Tiefblau / Sternenweiß / Eis-Cyan)
- * 4. "Retro Synthwave" (Sunset-Pink / Outrun-Türkis / Violett)
- * 5. "Nordic Valhalla" (Gletscher-Blau / Nordisches Bronze-Gold / Frost-Schiefer)
- * 6. "Wasteland Pip-Tech" (Phosphor-Grün / Bernstein-Orange / Bunker-Anthrazit)
- * 7. "Samurai Sakura" (Kirschblüten-Karmesin / Jade-Gold / Mitternachts-Indigo)
+ * Unterstützte App-Sprachen.
+ * Beim allerersten Start liest die App automatisch die Systemsprache des Handys (`getDeviceSystemLanguageCode()`)
+ * ein und setzt die passende Sprache. In den Einstellungen kann die Sprache jederzeit geändert werden.
+ */
+enum class AppLanguage(
+    val id: String,
+    val nativeLabel: String,
+    val subtitle: String,
+    val flagEmoji: String
+) {
+    SYSTEM(
+        id = "system",
+        nativeLabel = "Systemsprache (Automatisch)",
+        subtitle = "Übernimmt automatisch die Sprache deines Handys",
+        flagEmoji = "📱"
+    ),
+    GERMAN(
+        id = "de",
+        nativeLabel = "Deutsch",
+        subtitle = "Deutsche Benutzeroberfläche",
+        flagEmoji = "🇩🇪"
+    ),
+    ENGLISH(
+        id = "en",
+        nativeLabel = "English",
+        subtitle = "English user interface",
+        flagEmoji = "🇬🇧"
+    ),
+    SPANISH(
+        id = "es",
+        nativeLabel = "Español",
+        subtitle = "Interfaz en español",
+        flagEmoji = "🇪🇸"
+    ),
+    FRENCH(
+        id = "fr",
+        nativeLabel = "Français",
+        subtitle = "Interface en français",
+        flagEmoji = "🇫🇷"
+    );
+
+    companion object {
+        fun getDeviceSystemLanguageCode(): String {
+            return try {
+                val locales = Resources.getSystem().configuration.locales
+                if (!locales.isEmpty) {
+                    locales.get(0).language.lowercase(Locale.ROOT)
+                } else {
+                    Locale.getDefault().language.lowercase(Locale.ROOT)
+                }
+            } catch (_: Throwable) {
+                Locale.getDefault().language.lowercase(Locale.ROOT)
+            }
+        }
+
+        fun fromSystemLocale(): AppLanguage {
+            val sys = getDeviceSystemLanguageCode()
+            return when {
+                sys.startsWith("de") -> GERMAN
+                sys.startsWith("en") -> ENGLISH
+                sys.startsWith("es") -> SPANISH
+                sys.startsWith("fr") -> FRENCH
+                else -> GERMAN
+            }
+        }
+
+        fun fromId(id: String?): AppLanguage {
+            if (id.isNullOrBlank()) {
+                return fromSystemLocale()
+            }
+            return entries.firstOrNull { it.id == id } ?: fromSystemLocale()
+        }
+    }
+}
+
+/**
+ * Benutzerdefinierte Farben für das frei anpassbare "Eigenes Design (Custom)".
+ */
+data class CustomThemeColors(
+    val primaryHex: String = "#00F0FF",
+    val secondaryHex: String = "#FCEE09",
+    val backgroundHex: String = "#0A0C12",
+    val surfaceHex: String = "#141824"
+)
+
+/**
+ * Die 7 vorgefertigten Story-Gaming-Designs + 1 frei konfigurierbares "Eigenes Design (Custom)"
+ * (gespeichert via DataStore Preferences).
  */
 enum class AppThemeStyle(
     val id: String,
@@ -71,6 +154,12 @@ enum class AppThemeStyle(
         displayName = "Samurai Sakura",
         subtitle = "Mitternachts-Indigo & Kirschblüte (Karmesin / Elfenbein-Gold)",
         palettePreviewText = "#FB7185 • #FDE047 • #131124"
+    ),
+    CUSTOM_DESIGN(
+        id = "custom_design",
+        displayName = "Eigenes Design (Custom)",
+        subtitle = "Dein individuell zusammengestelltes Farbschema",
+        palettePreviewText = "Frei anpassbar"
     );
 
     companion object {
@@ -81,21 +170,64 @@ enum class AppThemeStyle(
 }
 
 /**
- * DataStore-Repository für das dynamische Theme-System sowie die verknüpfte Steam-ID.
+ * DataStore-Repository für:
+ * 1. Dynamisches Theme-System (7 Presets + frei anpassbares Custom-Design)
+ * 2. Automatische Erkennung der Handy-Systemsprache beim ersten Start + manuelle Sprachwahl
+ * 3. Verknüpfte Steam-ID & lokal gecachte Admin-Keys
  */
 class ThemePreferencesRepository(private val context: Context) {
 
     private object Keys {
         val SELECTED_THEME = stringPreferencesKey("selected_theme_style")
+        val CUSTOM_PRIMARY_HEX = stringPreferencesKey("custom_theme_primary_hex")
+        val CUSTOM_SECONDARY_HEX = stringPreferencesKey("custom_theme_secondary_hex")
+        val CUSTOM_BACKGROUND_HEX = stringPreferencesKey("custom_theme_background_hex")
+        val CUSTOM_SURFACE_HEX = stringPreferencesKey("custom_theme_surface_hex")
+        val SELECTED_LANGUAGE = stringPreferencesKey("selected_app_language")
         val LINKED_STEAM_ID = stringPreferencesKey("linked_steam_id")
+        val CACHED_STEAM_API_KEY = stringPreferencesKey("cached_steam_api_key")
+        val CACHED_TWITCH_CLIENT_ID = stringPreferencesKey("cached_twitch_client_id")
+        val CACHED_TWITCH_CLIENT_SECRET = stringPreferencesKey("cached_twitch_client_secret")
     }
 
     val selectedThemeFlow: Flow<AppThemeStyle> = context.dataStore.data.map { prefs ->
         AppThemeStyle.fromId(prefs[Keys.SELECTED_THEME])
     }
 
+    val customThemeColorsFlow: Flow<CustomThemeColors> = context.dataStore.data.map { prefs ->
+        CustomThemeColors(
+            primaryHex = prefs[Keys.CUSTOM_PRIMARY_HEX] ?: "#00F0FF",
+            secondaryHex = prefs[Keys.CUSTOM_SECONDARY_HEX] ?: "#FCEE09",
+            backgroundHex = prefs[Keys.CUSTOM_BACKGROUND_HEX] ?: "#0A0C12",
+            surfaceHex = prefs[Keys.CUSTOM_SURFACE_HEX] ?: "#141824"
+        )
+    }
+
+    val selectedLanguageFlow: Flow<AppLanguage> = context.dataStore.data.map { prefs ->
+        AppLanguage.fromId(prefs[Keys.SELECTED_LANGUAGE])
+    }
+
     val linkedSteamIdFlow: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[Keys.LINKED_STEAM_ID] ?: ""
+    }
+
+    /**
+     * Liest beim allerersten Start automatisch die Systemsprache des Handys aus
+     * und speichert sie als Startsprache, sofern der Nutzer noch keine eigene Wahl getroffen hat.
+     */
+    suspend fun initializeSystemLanguageIfUnset() {
+        context.dataStore.edit { prefs ->
+            if (prefs[Keys.SELECTED_LANGUAGE].isNullOrBlank()) {
+                val detected = AppLanguage.fromSystemLocale()
+                prefs[Keys.SELECTED_LANGUAGE] = detected.id
+            }
+        }
+    }
+
+    suspend fun setAppLanguage(language: AppLanguage) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.SELECTED_LANGUAGE] = language.id
+        }
     }
 
     suspend fun setThemeStyle(style: AppThemeStyle) {
@@ -104,9 +236,50 @@ class ThemePreferencesRepository(private val context: Context) {
         }
     }
 
+    suspend fun saveCustomThemeColors(
+        colors: CustomThemeColors,
+        activateCustomTheme: Boolean = true
+    ) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.CUSTOM_PRIMARY_HEX] = colors.primaryHex.trim()
+            prefs[Keys.CUSTOM_SECONDARY_HEX] = colors.secondaryHex.trim()
+            prefs[Keys.CUSTOM_BACKGROUND_HEX] = colors.backgroundHex.trim()
+            prefs[Keys.CUSTOM_SURFACE_HEX] = colors.surfaceHex.trim()
+            if (activateCustomTheme) {
+                prefs[Keys.SELECTED_THEME] = AppThemeStyle.CUSTOM_DESIGN.id
+            }
+        }
+    }
+
     suspend fun setLinkedSteamId(steamId: String) {
         context.dataStore.edit { prefs ->
             prefs[Keys.LINKED_STEAM_ID] = steamId.trim()
+        }
+    }
+
+    suspend fun cacheRuntimeApiKeysLocally(
+        twitchClientId: String,
+        twitchClientSecret: String,
+        steamApiKey: String
+    ) {
+        context.dataStore.edit { prefs ->
+            if (twitchClientId.isNotBlank()) prefs[Keys.CACHED_TWITCH_CLIENT_ID] = twitchClientId.trim()
+            if (twitchClientSecret.isNotBlank()) prefs[Keys.CACHED_TWITCH_CLIENT_SECRET] = twitchClientSecret.trim()
+            if (steamApiKey.isNotBlank()) prefs[Keys.CACHED_STEAM_API_KEY] = steamApiKey.trim()
+        }
+    }
+
+    suspend fun restoreCachedApiKeysIntoAppConfig() {
+        val prefs = context.dataStore.data.first()
+        val cachedTwitchId = prefs[Keys.CACHED_TWITCH_CLIENT_ID].orEmpty().trim()
+        val cachedTwitchSecret = prefs[Keys.CACHED_TWITCH_CLIENT_SECRET].orEmpty().trim()
+        val cachedSteamKey = prefs[Keys.CACHED_STEAM_API_KEY].orEmpty().trim()
+        if (cachedTwitchId.isNotBlank() || cachedTwitchSecret.isNotBlank() || cachedSteamKey.isNotBlank()) {
+            AppConfig.updateRuntimeAdminKeys(
+                twitchClientId = cachedTwitchId.ifBlank { AppConfig.TWITCH_CLIENT_ID },
+                twitchClientSecret = cachedTwitchSecret.ifBlank { AppConfig.TWITCH_CLIENT_SECRET },
+                steamApiKey = cachedSteamKey.ifBlank { AppConfig.STEAM_API_KEY }
+            )
         }
     }
 }

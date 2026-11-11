@@ -203,7 +203,8 @@ data class SteamLibraryImportReport(
     val games: List<LocalGame>,
     val usedWebApi: Boolean = false,
     val usedAuthenticatedSession: Boolean = false,
-    val onlyPublicShowcaseFound: Boolean = false
+    val onlyPublicShowcaseFound: Boolean = false,
+    val diagnosticInfo: String = ""
 )
 
 /**
@@ -300,3 +301,12 @@ data class SteamInventoryItem(
     val steamDbAppUrl: String
         get() = "https://steamdb.info/app/$appId/items/"
 }
+
+/**
+ * Ergebnis beim Versuch, ein Spiel direkt über die eingeloggte Steam Store Sitzung zur Steam-Wunschliste hinzuzufügen.
+ */
+data class SteamWishlistAddResult(
+    val successOnSteam: Boolean,
+    val appId: Long,
+    val message: String
+)
