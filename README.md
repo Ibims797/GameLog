@@ -195,38 +195,6 @@ Localization supports:
 
 ---
 
-## Getting Started
-
-### Prerequisites
-- Android Studio with Android SDK
-- Kotlin / Gradle project setup
-- A Firebase project if you want cloud sync and auth enabled
-- Optional Steam/IGDB/Twitch credentials for full remote features
-
-### Option 1: Build from source
-1. Clone the repository.
-2. Open it in Android Studio.
-3. Let Gradle sync the project.
-4. Configure Firebase if required (`google-services.json` and Firestore setup).
-5. Build the APK or run it on a device/emulator.
-
-### Option 2: Download the APK from CI
-Every push triggers `.github/workflows/build-apk.yml`.
-
-1. Open the GitHub repository.
-2. Go to the Actions tab.
-3. Select the latest workflow run named `Build Android APK`.
-4. Download the artifact from the run summary.
-
-### Option 3: Configure runtime secrets
-If you want full IGDB/Twitch/Steam access:
-1. Create a Firebase project and enable Firestore.
-2. Add your secure admin keys to the protected `/admin_vault/api_secrets` document.
-3. Ensure the Firestore rules allow access only to the authorized admin account.
-4. Keep secrets out of source control.
-
----
-
 ## Firebase & Cloud Setup
 
 The repo includes:
